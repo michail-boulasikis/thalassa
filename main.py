@@ -22,7 +22,7 @@ u = torch.sin(2 * torch.pi * x)
 conv_data = torch.zeros(3, N)
 
 # Convolution kernel, utilizing the auxiliary features, note the zeros in the kernel. Typically, we would have
-# a stencil of 3 non-zero points, but here we "roll" the stencil in the feature dimension by using auxiliary features.
+# a stencil of 3 non-zero points, but here I "roll" the stencil in the feature dimension by using auxiliary features.
 # Despite the zeroes technically not being needed, the stencil is still 3 points wide.
 # We need it so in order to respect the boundary conditions.
 conv_kernel = torch.tensor([[0, 1, 0], [0, -dt / (2 * dx), 0], [0, dt / (2 * dx), 0]])
