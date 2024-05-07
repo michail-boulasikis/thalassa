@@ -1,176 +1,181 @@
 import sympy
 import numpy as np
-
 import functools
+
+import pprint
 
 
 class StencilCompiler(object):
-
-    def __init__(self, eq, methods=None, unknown="u"):
-        # 1: Check if the equation is a string and convert it to a sympy expression
-        if type(eq) == str:
-            eq = sympy.sympify(eq)
-        self.eq = eq
-        # 2: Find all symbols in the equation
-        self.eq_symbols = {s.name: s for s in eq.atoms(sympy.Symbol, sympy.Function)}
-        # 3: Find the unknown function in the equation
-        self.unknown = self.eq_symbols.get(unknown)
-        # 4: Error handling
-        if not self.unknown:
-            raise ValueError(f"Unknown function '{unknown}' not found in equation '{eq}'")
-        # Check if the unknown is a function
-        if not isinstance(self.unknown, sympy.Function):
-            raise ValueError(f"Unknown function '{unknown}' is not a function in equation '{eq}'")
-        # 5: Assign the discretization methods
-        self.methods = methods
-
-    def compile(self, methods=None):
-        # 1: Check if new discretization methods are provided
-        if methods:
-            self.methods = methods
-        if not self.methods:
-            raise ValueError(f"No discretization methods provided for discretizing equation '{self.eq}'")
-        # 2: Compile the stencil for the equation
-        # 2.1: Discretize the equation
-        ubase, idx = self._discretize()
-        # 2.2: Solve for the next time step (if possible) (expression for the next time step is stored in self.eq)
-        self._solve_for_next_timestep(ubase, idx)
-        # 2.3: Perform optimizations to reduce number of auxiliary features
-        self._common_subexpression_elimination()
-        # 2.4: Compute the stencil and the instructions for computing the auxiliary features
-        return self._compute_stencil(ubase, idx)
-
-    def _discretize(self):
-        # 1: Find the minimum and maximum indices for each variable
-        #    (these indices determine the offset in the tensors we are looking at when doing the convolution)
-        indices = []
-        for _, data in self.methods.items():
-            indices.extend(data["indices"])
-        minimums = np.min(indices, axis=0)
-        maximums = np.max(indices, axis=0)
-        # Here we create the indexed base and the indexed variables for the unknown function
-        # In sympy an indexed expression is as follows: Indexed(IndexedBase, Index1, Index2, ...)
-        # 2: Create the indexed base for the unknown function
-        ubase = sympy.IndexedBase(self.unknown.name)
-        # 3: Create the index variables for the unknown function
-        indices = [sympy.Idx(f"i_{i}", (m, M)) for i, (m, M) in enumerate(zip(minimums, maximums))]
-        # 4: Replace the derivatives with the FDM expressions
-        for method, data in self.methods.items():
-            # Create the derivative's FDM expression
-            deriv = sympy.sympify(f"Derivative({self.unknown}, {','.join(method)})")
-            # Replace the derivative with the FDM expression
-            fdm_expr = sum(data["coeffs"][i] * ubase[idx] for i, idx in enumerate(data["indices"]))
-            # Substitution happens here
-            self.eq = self.eq.subs(deriv, fdm_expr)
-        # 5: Replace the unknown function with the indexed base
-        zero_index = [0 for _ in range(len(indices))]
-        self.eq = self.eq.subs(self.unknown, ubase[zero_index])
-        return ubase, indices
-
-    def _solve_for_next_timestep(self, ubase, indices):
-        # 1: Define the index of the next time step
-        idx_next_timestep = [1, *[0 for _ in range(len(indices) - 1)]]
-        # 2: Try to solve the equation for the next time step
-        self.eq = sympy.solve(self.eq, ubase[idx_next_timestep])
-        # 3: Error handling
-        if not self.eq:
+    def __init__(self, equations, unknowns, known_functions, free_symbols, log=False):
+        if not equations or not unknowns or not free_symbols:
+            raise ValueError("Equations, unknowns, and free symbols must be provided")
+        if not isinstance(equations[0], sympy.Eq):
+            raise ValueError("Equations must be sympy equations")
+        self.equations = equations
+        # Check whether arrays contain functions or symbols
+        if not all(isinstance(x, (sympy.Function, str)) for x in unknowns) \
+                and not all(isinstance(x, (sympy.Function, str)) for x in known_functions) \
+                and not all(isinstance(x, (sympy.Symbol, str)) for x in free_symbols):
             raise ValueError(
-                f"Failed to solve equation '{self.eq}' for the next time step, method might be implicit or equation"
-                f" might be too complex to solve analytically.")
-        if len(self.eq) > 1:
-            raise ValueError(f"Multiple solutions found for the next time step: {self.eq}")
-        # 4: Remove the list and keep the expression
-        #    (sympy.solve returns a list of solutions, but we only expect one solution)
-        #    From that point on, self.eq holds an expression for the next time step, not the equation (refactor?)
-        self.eq = self.eq[0]
+                "Unknowns, known functions, and free symbols must be sympy functions or symbols or strings")
+        # We turn the unknowns, known functions, and free symbols into strings
+        # otherwise it's hard to actually use them since the equation does not contain the same object references
+        self.unknowns = [str(x) if not isinstance(x, str) else x for x in unknowns]
+        self.known_functions = [str(x) if not isinstance(x, str) else x for x in known_functions]
+        self.free_symbols = [str(x) if not isinstance(x, str) else x for x in free_symbols]
+        # Check if the number of equations is more or equal to the number of unknowns
+        if len(self.equations) < len(self.unknowns):
+            raise ValueError("The number of equations must be greater or equal to the number of unknowns")
+        self.log = log
 
-    def _common_subexpression_elimination(self):
-        # TODO: write optimizations here
-        self.eq = self.eq.expand()
+    def compile(self, discretization, focus="depth"):
+        # 1. Discretize the equations
+        #    This step replaces the derivatives with the FDM expressions given in the discretization dictionary
+        d_equations = self._discretize(discretization)
+        # 1.1 Compute the kernel shape given the discretization (this is easier done here than later)
+        # 2. Solve for the next time step where possible
+        #    This step tries to solve the equations for the next time step. If it fails this could mean three things:
+        #    A. The method is implicit and the equation cannot be solved analytically
+        #    B. The equations are too complex to solve for the next time step.
+        #    C. The equations have more than one solution for the next time step. This is not supported.
+        d_s_exprs = self._solve_for_next_timestep(d_equations)
+        # 3. Perform optimizations (i.e., eliminate as many auxiliary features as possible)
+        #    This step reduces the number of auxiliary features by performing factoring
+        #    and common subexpression elimination.
+        feature_maps = self._optimize(d_s_exprs, focus)
+        # 4. Compute the stencil and the instructions how to compute the auxiliary features
+        stencil, instructions = self._compute_stencil(feature_maps)
+        return stencil, instructions
 
-    def _compute_stencil(self, ubase, indices):
-        # 1: Classify the terms in the equation, depending on whether they end up as coefficients or auxiliary features
-        term_classes = self._classify_terms()
-        # 2: Compute the stencil shape
-        stencil = StencilCompiler._compute_stencil_shape(term_classes, indices)
-        # 3: Collect the coefficients and auxiliary features for the stencil.
-        #    This step also generates the instructions for computing the auxiliary features
-        stencil, instr = StencilCompiler._collect_coefficients(term_classes, indices, stencil)
-        return stencil, instr
+    def _discretize(self, discretization):
+        d_eqs = []
+        for eq in self.equations:
+            deriv_exprs = []
+            for deriv, method in discretization.items():
+                sympy_dvs = [sympy.sympify(f"Derivative({uf}({','.join(self.free_symbols)}), {','.join(deriv)})") for uf
+                             in self.unknowns]
+                sympy_dvs_order = [sympy_dv.derivative_count for sympy_dv in sympy_dvs]
+                deriv_exprs.extend(zip(sympy_dvs, self.unknowns, sympy_dvs_order,
+                                       [sum(c * sympy.Indexed(uf, *idx) for c, idx in
+                                            zip(method["coeffs"], method["indices"]) if c != 0)
+                                        for uf in self.unknowns]))
+            deriv_exprs.sort(key=lambda x: x[2], reverse=True)
+            for deriv_expr, _, _, fdm_expr in deriv_exprs:
+                eq = eq.subs(deriv_expr, fdm_expr)
+            for unk in self.unknowns:
+                zero_idx = [0 for _ in range(len(self.free_symbols))]
+                eq = eq.subs(sympy.sympify(f"{unk}({','.join(self.free_symbols)})"), sympy.Indexed(unk, *zero_idx))
+            d_eqs.append(eq)
+        return d_eqs
 
-    def _classify_terms(self):
-        term_classes = []
-        for term in sympy.Add.make_args(self.eq):
-            # Extract the constant factor from the term, used as a coefficient in the stencil
-            c, term = StencilCompiler._extract_constant(term)
-            # Classify the term as a coefficient or an auxiliary feature
-            term_classes.append((c, term, StencilCompiler._classify_term(term)))
-        return term_classes
+    def _solve_for_next_timestep(self, d_equations):
+        next_time_step_index = [1] + [0 for _ in range(len(self.free_symbols) - 1)]
+        next_time_step_vars = [sympy.Indexed(unk, *next_time_step_index) for unk in self.unknowns]
+        sols = sympy.solve(d_equations, next_time_step_vars, dict=True)
+        if not sols:
+            raise ValueError("Failed to solve for the next time step")
+        if len(sols) > 1:
+            raise ValueError("Multiple solutions found for the next time step, which is not supported")
+        return sols[0]
 
-    @staticmethod
-    def _extract_constant(term):
-        # 1: Find all the constant factors in the term
-        consts = [_x for _x in term.as_ordered_factors() if _x.is_constant() and not isinstance(_x, sympy.Indexed)]
-        # 2: Multiply them together
-        #    Note, the or statement is used to provide a default value in case the list is empty
-        c = functools.reduce(lambda x1, x2: x1 * x2, consts or [1.0])
-        # 3: Simplify the term by dividing it by the constant factor
-        term = sympy.nsimplify(term / c)
-        return c, term
+    def _optimize(self, d_s_exprs, focus="depth"):
+        feature_maps = {}
+        # No matter the optimization, we always need to group the terms in linear and non-linear.
+        for u_var, s_expr in d_s_exprs.items():
+            expr_terms = sympy.Add.make_args(s_expr)
+            expr_terms_no_ind = [term.replace(lambda expr: isinstance(expr, sympy.Indexed),
+                                              lambda expr: sympy.Symbol(expr.base.name))
+                                 for term in expr_terms]
 
-    @staticmethod
-    def _classify_term(term):
-        # 1. Find all the u-terms in the expression
-        us = term.atoms(sympy.Indexed)
-        if len(us) != 1:
-            # If there are 0 or multiple u-terms, the term is an auxiliary feature
-            # The case of 0 u-terms corresponds to a forcing term in the PDE
-            return "auxiliary"
-        u = us.pop()
-        # 2. Differentiate the term with respect to the u-term to determine if it is of the form c*u.
-        #    If it is, the term will contribute to a coefficient, otherwise it will be described as an auxiliary feature
-        return "coefficient" if term.diff(u).is_constant() else "auxiliary"
+            non_linear_terms = [sympy.Poly(e).total_degree() > 1 or len(e.atoms(sympy.Function)) > 0 for e in
+                                expr_terms_no_ind]
+            non_linear_sum = sum([t for i, t in enumerate(expr_terms) if non_linear_terms[i]])
+            linear_sum = sum([t for i, t in enumerate(expr_terms) if not non_linear_terms[i]])
+            feature_maps[u_var] = {
+                "linear": linear_sum,
+                "auxiliary_features": [non_linear_sum] if any(non_linear_terms) else []
+            }
+        # If we focus on memory, we just handle the whole non-linear sum as a complicated auxiliary feature
+        if focus == "memory":
+            pass
+        elif focus == "depth":
+            # If we focus on depth, we try to factor the non-linear sum
+            for u_var, features in feature_maps.items():
+                if not features["auxiliary_features"]:
+                    continue
+                factored = sympy.Add.make_args(features["auxiliary_features"][0])
+                feature_maps[u_var]["auxiliary_features"] = list(factored)
+        return feature_maps
 
-    @staticmethod
-    def _compute_stencil_shape(term_classes, indices):
-        # 1. Count the number of auxiliary features
-        n_aux = sum(1 for _, _, c in term_classes if c == "auxiliary")
-        # 2. Compute the stencil shape
-        n_stencil = np.array([i.upper - i.lower + 1 for i in indices])
-        n_stencil = np.roll(n_stencil, -1)
-        # 3. Add the number of auxiliary features to the last dimension of the stencil, "behind" the time steps
-        n_stencil[-1] += n_aux - 1
-        return np.zeros(shape=n_stencil)
+    def _compute_stencil(self, feature_maps):
+        # 1. Compute the stencil shape
+        stencil_shape, mM = self._compute_stencil_shape(feature_maps)
+        # 2. Collect the coefficients and instructions for computing the auxiliary features
+        stencil = np.zeros(stencil_shape)
+        instructions = {}
+        # 2.1 Handle the linear terms
+        aux_feature_index_begin = -1
+        for u_var, features in feature_maps.items():
+            linear_feature = features["linear"]
+            u_var_idx = self.unknowns.index(u_var.base.name)
+            for term in sympy.Add.make_args(linear_feature):
+                c = [t for t in term.as_ordered_factors() if t.is_constant() and not isinstance(t, sympy.Indexed)]
+                c = functools.reduce(lambda x1, x2: x1 * x2, c or [1.0])
+                term = sympy.nsimplify(term / c)
+                u = term.atoms(sympy.Indexed).pop()
+                stencil_idx = np.array([int(i) for i in u.indices])
+                stencil_idx[0] = stencil_idx[0] * len(self.unknowns) + u_var_idx
+                if stencil_idx[0] > aux_feature_index_begin:
+                    aux_feature_index_begin = stencil_idx[0]
+                stencil_idx -= np.array([v[0] for v in mM[u_var.base]])
+                stencil_idx = np.roll(stencil_idx, -1)
+                stencil[tuple(stencil_idx)] += c
+                spatial_idx_dummy = [stencil_idx[-1]] + [0 for _ in range(len(self.free_symbols) - 1)]
+                instructions[stencil_idx[-1]] = term.base[spatial_idx_dummy]
+        # 2.2 Handle the auxiliary features
+        for u_var, features in feature_maps.items():
+            aux_features = features["auxiliary_features"]
+            if not aux_features:
+                continue
+            for i, aux in enumerate(aux_features):
+                # 2.2.1 Extract coefficient which appears most often in the terms of the auxiliary feature
+                cs = [[c for c in t.as_ordered_factors()
+                      if c.is_constant() and not isinstance(c, (sympy.Indexed, sympy.Function))]
+                      for t in sympy.Add.make_args(aux)]
+                cs = [functools.reduce(lambda x1, x2: x1 * x2, c or [1.0]) for c in cs]
+                c = max(set(cs), key=cs.count)
+                # 2.2.2 Normalize the auxiliary feature by dividing it by the coefficient
+                aux = sympy.nsimplify(aux / c)
+                # 2.2.3 Compute the stencil index for the auxiliary feature
+                stencil_idx = np.array([int((v[1] - v[0]) / 2) for v in mM[u_var.base]])
+                stencil_idx = np.roll(stencil_idx, -1)
+                stencil_idx[-1] += aux_feature_index_begin + i + 1
+                aux_feature_index_begin = stencil_idx[-1]
+                stencil[tuple(stencil_idx)] += c
+                instructions[stencil_idx[-1]] = aux
+        return stencil, instructions
 
-    @staticmethod
-    def _collect_coefficients(term_classes, indices, stencil):
-        aux_count = indices[0].upper - indices[0].lower
-        instr = {}
-        for const, term, termclass in term_classes:
-            # Construct the stencil and the instructions for computing the auxiliary features
-            if termclass == "coefficient":
-                stencil, instr = StencilCompiler._handle_coefficient_term(const, term, indices, stencil, instr)
-            elif termclass == "auxiliary":
-                stencil, instr, aux_count = StencilCompiler._handle_auxiliary_term(const, term, indices, stencil, instr,
-                                                                                   aux_count)
-        return stencil, instr
-
-    @staticmethod
-    def _handle_coefficient_term(const, term, indices, stencil, instr):
-        _u = term.atoms(sympy.Indexed).pop()
-        stencil_idx = [int(_u.indices[n]) - idx.lower for n, idx in enumerate(indices)]
-        stencil_idx = np.roll(stencil_idx, -1)
-        instr[stencil_idx[-1]] = term
-        stencil[tuple(stencil_idx)] += const
-        return stencil, instr
-
-    @staticmethod
-    def _handle_auxiliary_term(const, term, indices, stencil, instr, aux_count):
-        stencil_idx = [int((idx.upper - idx.lower) / 2) for idx in indices]
-        stencil_idx = np.roll(stencil_idx, -1)
-        stencil_idx[-1] += aux_count
-        instr[stencil_idx[-1]] = term
-        stencil[tuple(stencil_idx)] += const
-        aux_count += 1
-        return stencil, instr, aux_count
-
+    def _compute_stencil_shape(self, feature_maps):
+        # All of this is necessary because my planning is shit and I have no proper indices.
+        indices = []
+        for _, components in feature_maps.items():
+            indices.extend(components["linear"].atoms(sympy.Indexed))
+            for aux in components["auxiliary_features"]:
+                indices.extend(aux.atoms(sympy.Indexed))
+        n_aux_features = sum([len(features["auxiliary_features"]) for features in feature_maps.values()])
+        indices = list(set(indices))
+        i_dict = {}
+        for i in indices:
+            if i.base not in i_dict:
+                i_dict[i.base] = []
+            i_dict[i.base].append([int(j) for j in i.indices])
+        # Find min and max of each element in i_dict
+        min_max = {k: [[min([j[i] for j in v]), max(j[i] for j in v)] for i in range(len(v[0]))]
+                   for k, v in i_dict.items()}
+        stencil_shape = [[v[1] - v[0] + 1 for v in j] for j in min_max.values()]
+        stencil_shape = np.max(np.array(stencil_shape), axis=0)
+        # Note, does not necessarily work well for all problems, investigate further
+        stencil_shape[0] *= len(self.unknowns)
+        stencil_shape[0] += n_aux_features
+        stencil_shape = np.roll(stencil_shape, -1)
+        return stencil_shape, min_max
