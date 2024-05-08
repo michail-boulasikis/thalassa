@@ -162,6 +162,15 @@ problems = {
         "free_symbols": [t.name, x.name],
         "discretization": discretization_1d_second
     },
+    # Tests 2nd order linear equations
+    # u_tt - u_xx = 0
+    "wave-equation": {
+        "eqs": [sympy.Eq(sympy.Derivative(u(t, x), t, t) - sympy.Derivative(u(t, x), x, x), 0)],
+        "unknowns": [u.name],
+        "known_functions": [],
+        "free_symbols": [t.name, x.name],
+        "discretization": discretization_1d_second_time
+    },
     # Tests equations with functional non-linearity in derivatives of u
     # u_t - u_x = 0.01 * exp(u_x)
     "kpp-deriv-functional-nonlinearity": {
@@ -171,15 +180,6 @@ problems = {
         "known_functions": [],
         "free_symbols": [t.name, x.name],
         "discretization": discretization_1d_second
-    },
-    # Tests 2nd order linear equations
-    # u_tt - u_xx = 0
-    "wave-equation": {
-        "eqs": [sympy.Eq(sympy.Derivative(u(t, x), t, t) - sympy.Derivative(u(t, x), x, x), 0)],
-        "unknowns": [u.name],
-        "known_functions": [],
-        "free_symbols": [t.name, x.name],
-        "discretization": discretization_1d_second_time
     }
 }
 
@@ -191,7 +191,7 @@ if __name__ == "__main__":
         for problem_name, problem in problems.items():
             print(f"Compiling {problem_name}...")
             compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
-                                       problem["known_functions"], problem["free_symbols"], log=False)
+                                       problem["known_functions"], problem["free_symbols"], log=True)
             kernel, instr = compiler.compile(problem["discretization"], focus="memory")
             pprint.pp(kernel)
             pprint.pp(instr)
@@ -202,7 +202,7 @@ if __name__ == "__main__":
         print(f"Compiling {args.problem}...")
         compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
                                    problem["known_functions"], problem["free_symbols"], log=False)
-        kernel, instr = compiler.compile(problem["discretization"], focus="memory")
+        kernel, instr = compiler.compile(problem["discretization"], focus="depth")
         pprint.pp(kernel)
         pprint.pp(instr)
         print(f"Compiled {args.problem} successfully!")

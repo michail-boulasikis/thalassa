@@ -2,8 +2,6 @@ import sympy
 import numpy as np
 import functools
 
-import pprint
-
 
 class StencilCompiler(object):
     def __init__(self, equations, unknowns, known_functions, free_symbols, log=False):
@@ -29,25 +27,38 @@ class StencilCompiler(object):
         self.log = log
 
     def compile(self, discretization, focus="depth"):
-        # 1. Discretize the equations
-        #    This step replaces the derivatives with the FDM expressions given in the discretization dictionary
-        d_equations = self._discretize(discretization)
-        # 1.1 Compute the kernel shape given the discretization (this is easier done here than later)
-        # 2. Solve for the next time step where possible
-        #    This step tries to solve the equations for the next time step. If it fails this could mean three things:
-        #    A. The method is implicit and the equation cannot be solved analytically
-        #    B. The equations are too complex to solve for the next time step.
-        #    C. The equations have more than one solution for the next time step. This is not supported.
-        d_s_exprs = self._solve_for_next_timestep(d_equations)
-        # 3. Perform optimizations (i.e., eliminate as many auxiliary features as possible)
-        #    This step reduces the number of auxiliary features by performing factoring
-        #    and common subexpression elimination.
-        feature_maps = self._optimize(d_s_exprs, focus)
-        # 4. Compute the stencil and the instructions how to compute the auxiliary features
-        stencil, instructions = self._compute_stencil(feature_maps)
+        # 1. Discretization of the unknowns in the equations.
+        #    We replace the derivatives of the unknowns with the supplied FDMs.
+        #    We also compute the discretization indices of each dimension,
+        #    which will be used to compute the stencil shape.
+        d_equations = self._discretize_unknowns(discretization)
+        if self.log:
+            print(f"\033[96mDiscretized equations:\033[0m {d_equations}")
+        d_ind = self._compute_fdm_indices(discretization)
+        if self.log:
+            print(f"\033[96mDiscretization indices:\033[0m {d_ind} with "
+                  f"min = {' '.join([str(i.lower) for i in d_ind])} and max = {' '.join([str(i.upper) for i in d_ind])}")
+        # 2. Solve for the next time step
+        #    We solve the discretized equations for the next time step.
+        #    This will give us the expressions for the unknowns at the next time step.
+        s_exprs = self._solve_for_next_timestep(d_equations)
+        if self.log:
+            print(f"\033[96mSolved for next time step:\033[0m {s_exprs}")
+        # 3. Separate the linear and non-const terms in the equations
+        s_dict = self._separate_linear_non_linear(s_exprs)
+        if self.log:
+            print(f"\033[96mSeparated linear and non-const terms:\033[0m {s_dict}")
+        # 4. Optimize the non-const terms by grouping them together in a more efficient way
+        s_dict = self._optimize(s_dict, focus=focus)
+        if self.log:
+            print(f"\033[96mOptimized non-const terms:\033[0m {s_dict}")
+        # 5. Compute the stencil shape and instructions for computing the stencil
+        stencil, instructions = self._compute_stencil(s_dict, d_ind)
         return stencil, instructions
+        # 6. Generate TF/PyTorch/MLIR code
+        # return self._codegen(stencil, instructions)
 
-    def _discretize(self, discretization):
+    def _discretize_unknowns(self, discretization):
         d_eqs = []
         for eq in self.equations:
             deriv_exprs = []
@@ -68,6 +79,14 @@ class StencilCompiler(object):
             d_eqs.append(eq)
         return d_eqs
 
+    def _compute_fdm_indices(self, discretization):
+        d_ind = []
+        for _, method in discretization.items():
+            d_ind.extend(method["indices"])
+        m = np.min(d_ind, axis=0)
+        M = np.max(d_ind, axis=0)
+        return [sympy.Idx(f"i_{i}", [m[i], M[i]]) for i in range(len(self.free_symbols))]
+
     def _solve_for_next_timestep(self, d_equations):
         next_time_step_index = [1] + [0 for _ in range(len(self.free_symbols) - 1)]
         next_time_step_vars = [sympy.Indexed(unk, *next_time_step_index) for unk in self.unknowns]
@@ -78,36 +97,60 @@ class StencilCompiler(object):
             raise ValueError("Multiple solutions found for the next time step, which is not supported")
         return sols[0]
 
-    def _optimize(self, d_s_exprs, focus="depth"):
-        feature_maps = {}
-        # No matter the optimization, we always need to group the terms in linear and non-linear.
-        for u_var, s_expr in d_s_exprs.items():
+    def _separate_linear_non_linear(self, s_exprs):
+        parts = {}
+        for u_var, s_expr in s_exprs.items():
+            s_expr = s_expr.expand()
             expr_terms = sympy.Add.make_args(s_expr)
             expr_terms_no_ind = [term.replace(lambda expr: isinstance(expr, sympy.Indexed),
-                                              lambda expr: sympy.Symbol(expr.base.name))
+                                              lambda expr: sympy.Dummy(u_var.base.name))
                                  for term in expr_terms]
-
             non_linear_terms = [sympy.Poly(e).total_degree() > 1 or len(e.atoms(sympy.Function)) > 0 for e in
                                 expr_terms_no_ind]
             non_linear_sum = sum([t for i, t in enumerate(expr_terms) if non_linear_terms[i]])
             linear_sum = sum([t for i, t in enumerate(expr_terms) if not non_linear_terms[i]])
-            feature_maps[u_var] = {
+            parts[u_var] = {
                 "linear": linear_sum,
-                "auxiliary_features": [non_linear_sum] if any(non_linear_terms) else []
+                "non-const": [non_linear_sum] if any(non_linear_terms) else []
             }
-        # If we focus on memory, we just handle the whole non-linear sum as a complicated auxiliary feature
+        return parts
+
+    def _optimize(self, split_exprs, focus="depth"):
+        # If we focus on memory, we just handle the whole non-const sum as a complicated auxiliary feature
         if focus == "memory":
             pass
         elif focus == "depth":
-            # If we focus on depth, we try to factor the non-linear sum
-            for u_var, features in feature_maps.items():
-                if not features["auxiliary_features"]:
+            # If we focus on depth, we try to factor the non-const sum
+            for u_var, features in split_exprs.items():
+                if not features["non-const"]:
                     continue
-                factored = sympy.Add.make_args(features["auxiliary_features"][0])
-                feature_maps[u_var]["auxiliary_features"] = list(factored)
-        return feature_maps
+                factored = sympy.Add.make_args(features["non-const"][0])
+                split_exprs[u_var]["non-const"] = list(factored)
+        # After optimization, we find the most common coefficient and normalize the auxiliary features
+        for u_var, features in split_exprs.items():
+            if not features["non-const"]:
+                continue
+            cs = [[c for c in t.as_ordered_factors() if
+                   c.is_constant() and not isinstance(c, (sympy.Indexed, sympy.Function))]
+                  for t in sympy.Add.make_args(features["non-const"][0])]
+            cs = [functools.reduce(lambda x1, x2: x1 * x2, c or [1.0]) for c in cs]
+            c = max(set(cs), key=cs.count)
+            split_exprs[u_var]["non-const"] = [(c, sympy.nsimplify(aux / c)) for aux in features["non-const"]]
+        return split_exprs
 
-    def _compute_stencil(self, feature_maps):
+    def _compute_stencil(self, feature_maps, d_ind):
+        stencil_shape = [len(self.unknowns)] + [i.upper - i.lower + 1 for i in d_ind]
+        stencil_shape[1] += sum([len(features["non-const"]) for features in feature_maps.values()]) - 1
+        stencil_shape.append(stencil_shape[1])
+        del stencil_shape[1]
+        stencil = np.zeros(stencil_shape)
+        print(stencil_shape)
+
+        return None, None
+
+
+"""
+    def _compute_stencil(self, feature_maps, d_ind):
         # 1. Compute the stencil shape
         stencil_shape, mM = self._compute_stencil_shape(feature_maps)
         # 2. Collect the coefficients and instructions for computing the auxiliary features
@@ -134,13 +177,13 @@ class StencilCompiler(object):
                 instructions[stencil_idx[-1]] = term.base[spatial_idx_dummy]
         # 2.2 Handle the auxiliary features
         for u_var, features in feature_maps.items():
-            aux_features = features["auxiliary_features"]
+            aux_features = features["non-const"]
             if not aux_features:
                 continue
             for i, aux in enumerate(aux_features):
                 # 2.2.1 Extract coefficient which appears most often in the terms of the auxiliary feature
                 cs = [[c for c in t.as_ordered_factors()
-                      if c.is_constant() and not isinstance(c, (sympy.Indexed, sympy.Function))]
+                       if c.is_constant() and not isinstance(c, (sympy.Indexed, sympy.Function))]
                       for t in sympy.Add.make_args(aux)]
                 cs = [functools.reduce(lambda x1, x2: x1 * x2, c or [1.0]) for c in cs]
                 c = max(set(cs), key=cs.count)
@@ -160,9 +203,9 @@ class StencilCompiler(object):
         indices = []
         for _, components in feature_maps.items():
             indices.extend(components["linear"].atoms(sympy.Indexed))
-            for aux in components["auxiliary_features"]:
+            for aux in components["non-const"]:
                 indices.extend(aux.atoms(sympy.Indexed))
-        n_aux_features = sum([len(features["auxiliary_features"]) for features in feature_maps.values()])
+        n_aux_features = sum([len(features["non-const"]) for features in feature_maps.values()])
         indices = list(set(indices))
         i_dict = {}
         for i in indices:
@@ -179,3 +222,4 @@ class StencilCompiler(object):
         stencil_shape[0] += n_aux_features
         stencil_shape = np.roll(stencil_shape, -1)
         return stencil_shape, min_max
+"""
