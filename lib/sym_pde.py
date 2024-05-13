@@ -68,16 +68,21 @@ class StencilCompiler(object):
         for eq in self.equations:
             deriv_exprs = []
             for deriv, method in discretization.items():
+                # We create a list of sympy expressions for the derivatives of the unknowns, depending on the FDMs
                 sympy_dvs = [sympy.sympify(f"Derivative({uf}({','.join(self.free_symbols)}), {','.join(deriv)})") for uf
                              in self.unknowns]
                 sympy_dvs_order = [sympy_dv.derivative_count for sympy_dv in sympy_dvs]
+                # Helper list of tuples of the form (sympy derivative, unknown, order, fdm expression)
                 deriv_exprs.extend(zip(sympy_dvs, self.unknowns, sympy_dvs_order,
                                        [sum(c * sympy.Indexed(uf, *idx) for c, idx in
                                             zip(method["coeffs"], method["indices"]) if c != 0)
                                         for uf in self.unknowns]))
+            # We sort the derivatives by their order, so we can substitute the highest order derivatives first
             deriv_exprs.sort(key=lambda x: x[2], reverse=True)
+            # Substitution happens here
             for deriv_expr, _, _, fdm_expr in deriv_exprs:
                 eq = eq.subs(deriv_expr, fdm_expr)
+            # We also substitute the 0th order derivatives with indexed unknowns (e.g. u -> u[0,0])
             for unk in self.unknowns:
                 zero_idx = [0 for _ in range(len(self.free_symbols))]
                 eq = eq.subs(sympy.sympify(f"{unk}({','.join(self.free_symbols)})"), sympy.Indexed(unk, *zero_idx))
@@ -86,10 +91,13 @@ class StencilCompiler(object):
 
     def _compute_fdm_indices(self, discretization):
         d_ind = []
+        # Collect all indices from the discretization methods
         for _, method in discretization.items():
             d_ind.extend(method["indices"])
         m = np.min(d_ind, axis=0)
         M = np.max(d_ind, axis=0)
+        # We create a list of sympy indices for each dimension - this is used to compute the stencil shape and make it
+        # easier to compute the stencil
         return [sympy.Idx(f"i_{i}", [m[i], M[i]]) for i in range(len(self.free_symbols))]
 
     def _solve_for_next_timestep(self, d_equations):
@@ -107,9 +115,12 @@ class StencilCompiler(object):
         for u_var, s_expr in s_exprs.items():
             s_expr = s_expr.expand()
             expr_terms = sympy.Add.make_args(s_expr)
+            # We replace the indexed terms with a dummy variable, so we can check if the term is linear
             expr_terms_no_ind = [term.replace(lambda expr: isinstance(expr, sympy.Indexed),
                                               lambda expr: sympy.Dummy(u_var.base.name))
                                  for term in expr_terms]
+            # A term is non-linear if it has a total degree greater than 1 (as a polynomial in the unknowns)
+            # or if it contains a function
             non_linear_terms = [sympy.Poly(e).total_degree() > 1 or len(e.atoms(sympy.Function)) > 0 for e in
                                 expr_terms_no_ind]
             non_linear_sum = sum([t for i, t in enumerate(expr_terms) if non_linear_terms[i]])
@@ -187,6 +198,8 @@ class StencilCompiler(object):
 
     def _process_non_const_features(self, features, var_idx, d_ind, stencil, instructions, aux_feature_index_begin):
         for i, (c, aux) in enumerate(features["non-const"]):
+            # Note: We assume that the auxiliary features are computed in a centered way
+            # otherwise we need to be smarter about how we compute the stencil indices
             stencil_idx = [var_idx] + [(idx.upper - idx.lower) // 2 for idx in d_ind]
             stencil_idx[1] = aux_feature_index_begin
             aux_feature_index_begin += 1
