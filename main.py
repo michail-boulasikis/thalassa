@@ -80,6 +80,17 @@ discretization_1d_second_time = {
     }
 }
 
+discretization_1d_wave = {
+    "xx": {
+        "coeffs": [0.0001, -0.0002, 0.0001],
+        "indices": [[0, 1], [0, 0], [0, -1]]
+    },
+    "tt": {
+        "coeffs": [0.0001, -0.0002, 0.0001],
+        "indices": [[1, 0], [0, 0], [-1, 0]]
+    }
+}
+
 
 free_symbols = list(map(sympy.Symbol, ["t", "x", "y"]))
 t, x, y = free_symbols
@@ -169,7 +180,7 @@ problems = {
         "unknowns": [u.name],
         "known_functions": [],
         "free_symbols": [t.name, x.name],
-        "discretization": discretization_1d_second_time
+        "discretization": discretization_1d_wave
     },
     # Tests equations with functional non-linearity in derivatives of u
     # u_t - u_x = 0.01 * exp(u_x)
@@ -193,16 +204,12 @@ if __name__ == "__main__":
             compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
                                        problem["known_functions"], problem["free_symbols"], log=True)
             kernel, instr = compiler.compile(problem["discretization"], focus="memory")
-            pprint.pp(kernel)
-            pprint.pp(instr)
             print(f"Compiled {problem_name} successfully!")
             print("\n\n")
     else:
         problem = problems[args.problem]
         print(f"Compiling {args.problem}...")
         compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
-                                   problem["known_functions"], problem["free_symbols"], log=False)
-        kernel, instr = compiler.compile(problem["discretization"], focus="depth")
-        pprint.pp(kernel)
-        pprint.pp(instr)
+                                   problem["known_functions"], problem["free_symbols"], log=True)
+        kernel, instr = compiler.compile(problem["discretization"], focus="memory")
         print(f"Compiled {args.problem} successfully!")
