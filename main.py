@@ -1,4 +1,5 @@
 from lib.sym_pde import StencilCompiler
+#import lib.code_gen
 import sympy
 import pprint
 import sys
@@ -197,19 +198,19 @@ problems = {
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
     args.add_argument("--problem", type=str, default=None)
+    args.add_argument("--log", type=bool, default=False)
     args = args.parse_args()
     if not args.problem:
         for problem_name, problem in problems.items():
             print(f"Compiling {problem_name}...")
             compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
-                                       problem["known_functions"], problem["free_symbols"], log=True)
+                                       problem["known_functions"], problem["free_symbols"], log=args.log)
             kernel, instr = compiler.compile(problem["discretization"], focus="memory")
             print(f"Compiled {problem_name} successfully!")
-            print("\n\n")
     else:
         problem = problems[args.problem]
         print(f"Compiling {args.problem}...")
         compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
-                                   problem["known_functions"], problem["free_symbols"], log=True)
+                                   problem["known_functions"], problem["free_symbols"], log=args.log)
         kernel, instr = compiler.compile(problem["discretization"], focus="memory")
         print(f"Compiled {args.problem} successfully!")

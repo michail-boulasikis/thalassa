@@ -4,7 +4,11 @@ import functools
 
 
 class StencilCompiler(object):
-    def __init__(self, equations, unknowns, known_functions, free_symbols, log=False):
+
+    _stencil = None
+    _instructions = None
+
+    def __init__(self, equations, unknowns, known_functions, free_symbols, log=False, target="pytorch"):
         if not equations or not unknowns or not free_symbols:
             raise ValueError("Equations, unknowns, and free symbols must be provided")
         if not isinstance(equations[0], sympy.Eq):
@@ -25,6 +29,9 @@ class StencilCompiler(object):
         if len(self.equations) < len(self.unknowns):
             raise ValueError("The number of equations must be greater or equal to the number of unknowns")
         self.log = log
+        if target.lower() not in ["pytorch", "tf", "mlir"]:
+            raise ValueError("Target must be one of 'pytorch', 'tf', 'mlir'")
+        self.target = target.lower()
 
     def compile(self, discretization, focus="depth"):
         if self.log:
@@ -59,9 +66,9 @@ class StencilCompiler(object):
         if self.log:
             print(f"\033[96mComputed Stencil:\033[0m {stencil}")
             print(f"\033[96mComputed Instructions:\033[0m {instructions}")
+        self._stencil = stencil
+        self._instructions = instructions
         return stencil, instructions
-        # 6. Generate TF/PyTorch/MLIR code
-        # return self._codegen(stencil, instructions)
 
     def _discretize_unknowns(self, discretization):
         d_eqs = []
