@@ -1,93 +1,92 @@
 from lib.sym_pde import StencilCompiler
-#import lib.code_gen
+import lib.code_gen
 import sympy
 import pprint
 import sys
 import argparse
 
+
+dx = dy = 0.1
+dt = 0.005
+burgers_diff_coeff = 0.2
+
 discretization_2d = {
     # du/dx ~= 0.005 * (u(t, x + dx, y) - u(t, x - dx, y))
     # dx = dy = dt = 0.01
     "x": {
-        "coeffs": [0.005, -0.005],
+        "coeffs": [1.0/(0.5*dx), -1.0/(0.5*dx)],
         "indices": [[0, 1, 0], [0, -1, 0]]
     },
     "y": {
-        "coeffs": [0.005, -0.005],
+        "coeffs": [1.0/(0.5*dy), -1.0/(0.5*dy)],
         "indices": [[0, 0, 1], [0, 0, -1]]
     },
     "t": {
-        "coeffs": [0.01, -0.01],
+        "coeffs": [1.0/dt, -1.0/dt],
         "indices": [[1, 0, 0], [0, 0, 0]]
     },
     "xx": {
-        "coeffs": [0.0001, -0.0002, 0.0001],
+        "coeffs": [1.0/(dx*dx), -2.0/(dx*dx), 1.0/(dx*dx)],
         "indices": [[0, 1, 0], [0, 0, 0], [0, -1, 0]]
     },
     "yy": {
-        "coeffs": [0.0001, -0.0002, 0.0001],
+        "coeffs": [1.0/(dy*dy), -2.0/(dy*dy), 1.0/(dy*dy)],
         "indices": [[0, 0, 1], [0, 0, 0], [0, 0, -1]]
     }
 }
 
 discretization_1d = {
-    # du/dx ~= 0.005 * (u(t, x + dx) - u(t, x))
-    # dx = dt = 0.01
     "x": {
-        "coeffs": [0.005, -0.005],
+        "coeffs": [1.0/(0.5*dx), -1.0/(0.5*dx)],
         "indices": [[0, 1], [0, -1]]
     },
     "t": {
-        "coeffs": [0.01, -0.01],
+        "coeffs": [1.0/dt, -1.0/dt],
         "indices": [[1, 0], [0, 0]]
     }
 }
 
 discretization_1d_second = {
-    # du/dx ~= 0.005 * (u(t, x + dx) - u(t, x))
-    # dx = dt = 0.01
     "x": {
-        "coeffs": [0.005, -0.005],
+        "coeffs": [1.0/(0.5*dx), -1.0/(0.5*dx)],
         "indices": [[0, 1], [0, -1]]
     },
     "t": {
-        "coeffs": [0.01, -0.01],
+        "coeffs": [1.0/dt, -1.0/dt],
         "indices": [[1, 0], [0, 0]]
     },
     "xx": {
-        "coeffs": [0.0001, -0.0002, 0.0001],
+        "coeffs": [1.0/(dx*dx), -2.0/(dx*dx), 1.0/(dx*dx)],
         "indices": [[0, 1], [0, 0], [0, -1]]
     }
 }
 
 discretization_1d_second_time = {
-    # du/dx ~= 0.005 * (u(t, x + dx) - u(t, x))
-    # dx = dt = 0.01
     "x": {
-        "coeffs": [0.005, -0.005],
+        "coeffs": [1.0/(0.5*dx), -1.0/(0.5*dx)],
         "indices": [[0, 1], [0, -1]]
     },
     "t": {
-        "coeffs": [0.01, -0.01],
+        "coeffs": [1.0/dt, -1.0/dt],
         "indices": [[1, 0], [0, 0]]
     },
     "xx": {
-        "coeffs": [0.0001, -0.0002, 0.0001],
+        "coeffs": [1.0/(dx*dx), -2.0/(dx*dx), 1.0/(dx*dx)],
         "indices": [[0, 1], [0, 0], [0, -1]]
     },
     "tt": {
-        "coeffs": [0.0001, -0.0002, 0.0001],
+        "coeffs": [1.0/(dt*dt), -2.0/(dt*dt), 1.0/(dt*dt)],
         "indices": [[1, 0], [0, 0], [-1, 0]]
     }
 }
 
 discretization_1d_wave = {
     "xx": {
-        "coeffs": [0.0001, -0.0002, 0.0001],
+        "coeffs": [1.0/(dx*dx), -2.0/(dx*dx), 1.0/(dx*dx)],
         "indices": [[0, 1], [0, 0], [0, -1]]
     },
     "tt": {
-        "coeffs": [0.0001, -0.0002, 0.0001],
+        "coeffs": [1.0/(dt*dt), -2.0/(dt*dt), 1.0/(dt*dt)],
         "indices": [[1, 0], [0, 0], [-1, 0]]
     }
 }
@@ -141,7 +140,7 @@ problems = {
     # u_t + u * u_x = 0.2 * u_xx
     "burgers-1d-diffusion": {
         "eqs": [sympy.Eq(sympy.Derivative(u(t, x), t) + u(t, x) * sympy.Derivative(u(t, x), x),
-                         0.2 * sympy.Derivative(u(t, x), x, x))],
+                         burgers_diff_coeff * sympy.Derivative(u(t, x), x, x))],
         "unknowns": [u.name],
         "known_functions": [],
         "free_symbols": [t.name, x.name],
@@ -153,11 +152,11 @@ problems = {
     "burgers-2d-diffusion": {
         "eqs": [sympy.Eq(sympy.Derivative(u(t, x, y), t) + u(t, x, y) * sympy.Derivative(u(t, x, y), x)
                          + v(t, x, y) * sympy.Derivative(u(t, x, y), y),
-                0.2 * sympy.Derivative(u(t, x, y), x, x) + 0.2 * sympy.Derivative(u(t, x, y), y, y)
+                burgers_diff_coeff * sympy.Derivative(u(t, x, y), x, x) + burgers_diff_coeff * sympy.Derivative(u(t, x, y), y, y)
             ),
             sympy.Eq(sympy.Derivative(v(t, x, y), t) + u(t, x, y) * sympy.Derivative(v(t, x, y), x)
                          + v(t, x, y) * sympy.Derivative(v(t, x, y), y),
-                0.2 * sympy.Derivative(v(t, x, y), x, x) + 0.2 * sympy.Derivative(v(t, x, y), y, y)
+                burgers_diff_coeff * sympy.Derivative(v(t, x, y), x, x) + burgers_diff_coeff * sympy.Derivative(v(t, x, y), y, y)
             )
         ],
         "unknowns": [u.name, v.name],
@@ -205,12 +204,14 @@ if __name__ == "__main__":
             print(f"Compiling {problem_name}...")
             compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
                                        problem["known_functions"], problem["free_symbols"], log=args.log)
-            kernel, instr = compiler.compile(problem["discretization"], focus="memory")
+            kernel, instr, _ = compiler.compile(problem["discretization"], focus="memory")
             print(f"Compiled {problem_name} successfully!")
     else:
         problem = problems[args.problem]
         print(f"Compiling {args.problem}...")
         compiler = StencilCompiler(problem["eqs"], problem["unknowns"],
                                    problem["known_functions"], problem["free_symbols"], log=args.log)
-        kernel, instr = compiler.compile(problem["discretization"], focus="memory")
+        kernel, instr, prob = compiler.compile(problem["discretization"], focus="memory")
+        c = lib.code_gen.generate_pytorch(kernel, instr, prob, plot=True)
+        print(c)
         print(f"Compiled {args.problem} successfully!")

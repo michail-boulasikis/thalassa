@@ -4,7 +4,6 @@ import functools
 
 
 class StencilCompiler(object):
-
     _stencil = None
     _instructions = None
 
@@ -68,7 +67,8 @@ class StencilCompiler(object):
             print(f"\033[96mComputed Instructions:\033[0m {instructions}")
         self._stencil = stencil
         self._instructions = instructions
-        return stencil, instructions
+        return stencil, instructions, {"equations": self.equations, "unknowns": self.unknowns,
+                                       "known_functions": self.known_functions, "free_symbols": self.free_symbols}
 
     def _discretize_unknowns(self, discretization):
         d_eqs = []
@@ -187,7 +187,7 @@ class StencilCompiler(object):
             c, term = self._normalize_term(term)
             stencil_idx = self._calculate_stencil_idx(term, var_idx, d_ind)
             stencil[tuple(stencil_idx)] += c
-            spatial_idx_dummy = [stencil_idx[-1] + d_ind[0].lower] + [0 for _ in range(len(self.free_symbols) - 1)]
+            spatial_idx_dummy = [stencil_idx[-1] + d_ind[0].lower - var_idx] + [0 for _ in range(len(self.free_symbols) - 1)]
             instructions[stencil_idx[-1]] = term.base[spatial_idx_dummy]
 
     def _normalize_term(self, term):
