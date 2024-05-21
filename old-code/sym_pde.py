@@ -2,7 +2,6 @@ import sympy
 import numpy as np
 import functools
 
-
 class StencilCompiler(object):
     _stencil = None
     _instructions = None
