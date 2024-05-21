@@ -1,11 +1,29 @@
 from functools import cached_property
-
+from abc import ABC, abstractmethod
 import sympy
 import numpy as np
 import scipy
 
 
-class FDApproximationTaylor(object):
+class FDApproximation(ABC):
+
+    @cached_property
+    @abstractmethod
+    def _weights(self):
+        pass
+
+    @property
+    @abstractmethod
+    def derivative_expr(self):
+        pass
+
+    @property
+    @abstractmethod
+    def fdm_expr(self):
+        pass
+
+
+class FDApproximationTaylor(FDApproximation):
     def __init__(self, base_func, order, imin, imax, dx):
         if not isinstance(base_func, sympy.Function):
             raise ValueError("Base function for the FDM must be a sympy function")
@@ -31,7 +49,7 @@ class FDApproximationTaylor(object):
             raise ValueError("Step sizes must be provided for each variable in the base function")
         if not all(dx > 0 for dx in dx):
             raise ValueError("Step sizes must be positive")
-        if not all(dx < 1 for dx in dx):
+        if not all(dx <= 1 for dx in dx):
             raise ValueError("Step sizes must be less than 1")
         self.dx = dx
 
@@ -58,11 +76,42 @@ class FDApproximationTaylor(object):
 
     @property
     def derivative_expr(self):
-        return sympy.Derivative(self.base_func, *[(self.base_func.args[i], order) for i, order in enumerate(self.order) if order > 0])
+        return sympy.Derivative(self.base_func,
+                                *[(self.base_func.args[i], order) for i, order in enumerate(self.order) if order > 0])
 
     @property
     def fdm_expr(self):
-        return sum(self._weights[i] * sympy.Indexed(self.base_func.name, *(np.array(i) + self.imin)) for i in np.ndindex(*self._weights.shape))
+        return sum(self._weights[i] * sympy.Indexed(self.base_func.name, *(np.array(i) + self.imin)) for i in
+                   np.ndindex(*self._weights.shape))
 
 
-
+def fdm_simple_partial_derivative(deriv: sympy.Derivative, dx: float, method='forward', order=None):
+    if len(deriv.variable_count) != 1:
+        raise ValueError("Supplied derivative in the FDM helper is either a mixed derivative or wrongly typed. "
+                         "If you want to express the FDM of a mixed derivative use 'fdm_mixed_partial_derivative'.")
+    variable, deriv_order = deriv.variable_count[0]
+    if order is None:
+        order = int(deriv_order)
+    if order < deriv_order:
+        raise ValueError("Supplied order is smaller than the derivative order in the FDM helper")
+    func = deriv.args[0]
+    var_idx = func.args.index(variable)
+    imin = [0] * len(func.args)
+    imax = [0] * len(func.args)
+    order_array = [0] * len(func.args)
+    dx_array = [1.0] * len(func.args)
+    match method:
+        case 'forward':
+            imax[var_idx] = order
+        case 'backward':
+            imin[var_idx] = 1 - order
+        case 'central':
+            if order > 1 and not order % 2:
+                raise ValueError("Odd-order approximation to partial derivative cannot be central.")
+            imax[var_idx] = (order + 1) // 2
+            imin[var_idx] = - ((order + 1) // 2)
+        case _:
+            raise ValueError(f"Unknown FDM method supplied in helper function: {method}")
+    dx_array[var_idx] = dx
+    order_array[var_idx] = order
+    return FDApproximationTaylor(func, order_array, imin, imax, dx_array)

@@ -19,4 +19,6 @@ class PDESystem(object):
         self.free_functions = [f for eq in equations for f in eq.atoms(sympy.Function) if f not in unknowns]
 
     def __str__(self):
-        return f"PDESystem({self.equations}, {self.unknowns}, {self.free_symbols})"
+        return f"PDESystem({self.equations})"
+
+
