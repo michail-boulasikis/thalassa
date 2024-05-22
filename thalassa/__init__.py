@@ -3,4 +3,4 @@ __author__ = 'Boulasikis Michail'
 
 from .front_end import PDESystem, PDEFrontEnd
 from .discretization import FDApproximation, FDApproximationTaylor, fdm_simple_partial_derivative
-from .code_gen import pde_compile
+from .back_end import pde_compile

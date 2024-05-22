@@ -1,5 +1,5 @@
 from thalassa.front_end import StencilCompiler
-import thalassa.code_gen
+import thalassa.back_end
 import sympy
 import argparse
 
