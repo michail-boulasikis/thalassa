@@ -1,4 +1,4 @@
-from thalassa.sym_pde import StencilCompiler
+from thalassa.front_end import StencilCompiler
 import thalassa.code_gen
 import sympy
 import argparse

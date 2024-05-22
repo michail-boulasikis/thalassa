@@ -5,6 +5,7 @@ import thalassa
 # Traditional sympy symbols and functions
 t, x = symbols('t x')
 u = Function('u')(t, x)
+f = Function('f')
 
 pde = thalassa.PDESystem(
     # Transport equation (*$u_t + u_x = 0$*), in a list to allow for multiple equations
@@ -20,6 +21,9 @@ disc = [
     thalassa.fdm_simple_partial_derivative(D(u, x), 0.05, method='central')
 ]
 
-with open('transport.py', 'w') as output_file:
-    code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', plot=True)
-    output_file.write(code)
+front_end = thalassa.PDEFrontEnd(pde, disc)
+print(front_end.execute())
+
+# with open('transport.py', 'w') as output_file:
+#     code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', plot=True)
+#     output_file.write(code)
