@@ -21,9 +21,6 @@ disc = [
     thalassa.fdm_simple_partial_derivative(D(u, x), 0.05, method='central')
 ]
 
-front_end = thalassa.PDEFrontEnd(pde, disc)
-print(front_end.execute())
-
-# with open('transport.py', 'w') as output_file:
-#     code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', plot=True)
-#     output_file.write(code)
+with open('transport.py', 'w') as output_file:
+    code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', plot=True)
+    output_file.write(code)

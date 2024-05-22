@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+import thalassa
+
 
 class CodeEmitter(object):
     def __init__(self):
@@ -54,7 +56,7 @@ class EmitPreambleCodePhase(BackEndPhase):
             code.emit("import matplotlib.pyplot as plt")
 
 
-class PytorchBackEnd(object):
+class PytorchPDEBackEnd(object):
     def __init__(self, ir, disc, **kwargs):
         self.ir = ir
         self.disc = disc
@@ -75,4 +77,15 @@ class PytorchBackEnd(object):
 
 
 def pde_compile(pde, disc, **kwargs):
-    raise NotImplementedError("Method 'pde_compile' not implemented yet")
+    front_end = thalassa.PDEFrontEnd(pde, disc, **kwargs)
+    target_lang = kwargs.get('target', 'pytorch')
+    match target_lang:
+        case 'pytorch':
+            return PytorchPDEBackEnd(front_end.execute(), disc, **kwargs).execute()
+        case 'tensorflow':
+            raise ValueError("Tensorflow target is not supported yet.")
+        case 'mlir':
+            raise ValueError("MLIR target is not supported yet.")
+        case _:
+            raise ValueError(f"Unknown target {target_lang} provided to 'pde_compile'")
+
