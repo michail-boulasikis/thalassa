@@ -1,6 +1,7 @@
 import functools
 import sympy
 import itertools
+import copy
 
 from thalassa import discretization
 from abc import ABC, abstractmethod
@@ -271,7 +272,7 @@ class FactorAuxiliaryFeaturesPhase(FrontEndPhase):
 class PDEFrontEnd(object):
 
     def __init__(self, pde_system, discretizations, **kwargs):
-        self.pde_system = pde_system
+        self.pde_system = copy.deepcopy(pde_system)
         if not all(isinstance(d, discretization.FDApproximation) for d in discretizations):
             raise ValueError("Discretizations must be FDApproximation objects")
         if not discretizations:
