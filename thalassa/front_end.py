@@ -172,7 +172,7 @@ class RuleBasedExpressionOptimizationPhase(FrontEndPhase):
         if not self.enabled:
             return
         if self.frontend.solved_pdes:
-            self.frontend.solved_pdes = {k: (v.simplify()).expand() for k, v in self.frontend.solved_pdes.items()}
+            self.frontend.solved_pdes = {k: v.simplify() for k, v in self.frontend.solved_pdes.items()}
 
 
 class SplitConstNonConstPhase(FrontEndPhase):
@@ -192,7 +192,7 @@ class SplitConstNonConstPhase(FrontEndPhase):
             # Generate an intermediate representation (IR) of the PDE system
             parts = {}
             for k, v in self.frontend.solved_pdes.items():
-                expr_terms = sympy.Add.make_args(v)
+                expr_terms = sympy.Add.make_args(v.expand())
                 expr_terms_no_indices = [
                     term.replace(lambda e: isinstance(e, sympy.Indexed), lambda e: sympy.Dummy(k.base.name))
                     for term in expr_terms]
@@ -298,4 +298,4 @@ class PDEFrontEnd(object):
 
     def __str__(self):
         phase_str = '\n'.join([str(p) for p in self.phases])
-        return f"PDEFrontEnd with phases:\n{phase_str}\n\t...and PDE system {self.pde_system}"
+        return f"PDEFrontEnd with phases:\n{phase_str}\n...and PDE system {self.pde_system}"

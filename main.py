@@ -9,7 +9,7 @@ f = Function('f')
 
 pde = thalassa.PDESystem(
     # Transport equation (*$u_t + u_x = 0$*), in a list to allow for multiple equations
-    [Eq(D(u, t) + D(u, x), 0)],
+    [Eq(D(u, t) + u * D(u, x), 0)],
     # Unknown function(s) in the equation
     [u],
     # Free variables in the equation (thalassa expects time to be the first variable)
