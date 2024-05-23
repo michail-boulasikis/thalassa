@@ -25,6 +25,9 @@ class PDESystem(object):
     def __str__(self):
         return f"PDESystem({self.equations})"
 
+    def __repr__(self):
+        return self.__str__()
+
 
 class FrontEndPhase(ABC):
     def __init__(self, name, description, frontend, enabled=True):
@@ -265,14 +268,46 @@ class FactorAuxiliaryFeaturesPhase(FrontEndPhase):
                             aux_features[i] = [c, sympy.nsimplify(t / c)]
                     else:
                         c = _pull_most_common_factor(v[1])
-                        aux_features = [c, sympy.nsimplify(v[1] / c)]
+                        aux_features = [[c, sympy.nsimplify(v[1] / c)]]
                     self.frontend.ir[k] = [v[0], aux_features]
+
+
+class PrepareOutputsPhase(FrontEndPhase):
+    def __init__(self, frontend, enabled=True):
+        super().__init__("prepare_outputs", "Prepares and creates output products.",
+                         frontend, enabled)
+
+    def __call__(self):
+        if not self.enabled:
+            return
+        if self.frontend.ir:
+            outputs = {'pdes': self.frontend.pde_system_unchanged, 'disc': self.frontend.discretizations, 'instr': {
+                k.base.name: {
+                    'conv': v[0],
+                    'aux': [{
+                        'c': aux[0],
+                        'expr': aux[1]
+                    } for aux in v[1]] if type(v[1]) is list else {}
+                } for k, v in self.frontend.ir.items()
+            }}
+            orders = [
+                (u.name, sympy.Indexed(u.name, *([i] + [0] * len(u.args[1:]))))
+                for u in self.frontend.pde_system.unknowns
+                for i in list(range(0, -max([d.order[0] for d in outputs['disc'] if d.base_func.name == u.name]), -1))
+            ]
+            print(outputs)
+            orders.extend([
+                (k, aux['expr']) for k, v in outputs['instr'].items() for aux in v['aux']
+            ])
+            outputs['order'] = orders
+            self.frontend.ir = outputs
 
 
 class PDEFrontEnd(object):
 
     def __init__(self, pde_system, discretizations, **kwargs):
         self.pde_system = copy.deepcopy(pde_system)
+        self.pde_system_unchanged = copy.deepcopy(pde_system)
         if not all(isinstance(d, discretization.FDApproximation) for d in discretizations):
             raise ValueError("Discretizations must be FDApproximation objects")
         if not discretizations:
@@ -290,7 +325,8 @@ class PDEFrontEnd(object):
             RuleBasedExpressionOptimizationPhase(self, True),
             SplitConstNonConstPhase(self, kwargs.get('use_conv', True)),
             SplitAuxiliaryFeaturesPhase(self, True, kwargs.get('aux_split_strategy', 'memory')),
-            FactorAuxiliaryFeaturesPhase(self, kwargs.get('pull_factors', True))
+            FactorAuxiliaryFeaturesPhase(self, kwargs.get('pull_factors', True)),
+            PrepareOutputsPhase(self, True)
         ]
 
     def execute(self):

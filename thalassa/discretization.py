@@ -84,6 +84,12 @@ class FDApproximationTaylor(FDApproximation):
         return sum(self._weights[i] * sympy.Indexed(self.base_func.name, *(np.array(i) + self.imin)) for i in
                    np.ndindex(*self._weights.shape))
 
+    def __str__(self):
+        return f"{self.derivative_expr} ==> {self.fdm_expr}"
+
+    def __repr__(self):
+        return self.__str__()
+
 
 def fdm_simple_partial_derivative(deriv: sympy.Derivative, dx: float, method='forward', order=None):
     if len(deriv.variable_count) != 1:
@@ -106,8 +112,6 @@ def fdm_simple_partial_derivative(deriv: sympy.Derivative, dx: float, method='fo
         case 'backward':
             imin[var_idx] = 1 - order
         case 'central':
-            if order > 1 and not order % 2:
-                raise ValueError("Odd-order approximation to partial derivative cannot be central.")
             imax[var_idx] = (order + 1) // 2
             imin[var_idx] = - ((order + 1) // 2)
         case _:
