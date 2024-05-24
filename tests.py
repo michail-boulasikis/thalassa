@@ -5,7 +5,6 @@ from sympy import Derivative as D
 import sympy
 import os
 
-
 t, x, y = sympy.symbols('t x y')
 u, v = sympy.Function('u'), sympy.Function('v')
 f, g, h = sympy.Function('f'), sympy.Function('g'), sympy.Function('h')
@@ -45,7 +44,8 @@ probs = [
     },
     {
         "name": "burgers-1d-diffusion",
-        "pde": thalassa.PDESystem([Eq(D(u(t, x), t) + u(t, x) * D(u(t, x), x), 0.2 * D(u(t, x), (x, 2)))], [u(t, x)], [t, x]),
+        "pde": thalassa.PDESystem([Eq(D(u(t, x), t) + u(t, x) * D(u(t, x), x), 0.2 * D(u(t, x), (x, 2)))], [u(t, x)],
+                                  [t, x]),
         "disc": [
             thalassa.fdm_simple_partial_derivative(D(u(t, x), t), 0.001, method='forward'),
             thalassa.fdm_simple_partial_derivative(D(u(t, x), x), 0.05, method='central'),
@@ -62,7 +62,8 @@ probs = [
     },
     {
         "name": "kpp-deriv-exp",
-        "pde": thalassa.PDESystem([Eq(D(u(t, x), t) - D(u(t, x), x, x), 0.01 * sympy.exp(D(u(t, x), x)))], [u(t, x)], [t, x]),
+        "pde": thalassa.PDESystem([Eq(D(u(t, x), t) - D(u(t, x), x, x), 0.01 * sympy.exp(D(u(t, x), x)))], [u(t, x)],
+                                  [t, x]),
         "disc": [
             thalassa.fdm_simple_partial_derivative(D(u(t, x), t), 0.001, method='forward'),
             thalassa.fdm_simple_partial_derivative(D(u(t, x), x), 0.05, method='central'),
@@ -86,9 +87,11 @@ probs = [
     },
     {
         "name": "burgers-2d-diffusion",
-        "pde":  thalassa.PDESystem([
-            Eq(D(u(t, x, y), t) + u(t, x, y) * D(u(t, x, y), x) + v(t, x, y) * D(u(t, x, y), y), 0.02 * (D(u(t, x, y), (x, 2)) + D(u(t, x, y), (y, 2)))),
-            Eq(D(v(t, x, y), t) + v(t, x, y) * D(v(t, x, y), y) + u(t, x, y) * D(v(t, x, y), x), 0.02 * (D(v(t, x, y), (x, 2)) + D(v(t, x, y), (y, 2))))
+        "pde": thalassa.PDESystem([
+            Eq(D(u(t, x, y), t) + u(t, x, y) * D(u(t, x, y), x) + v(t, x, y) * D(u(t, x, y), y),
+               0.02 * (D(u(t, x, y), (x, 2)) + D(u(t, x, y), (y, 2)))),
+            Eq(D(v(t, x, y), t) + v(t, x, y) * D(v(t, x, y), y) + u(t, x, y) * D(v(t, x, y), x),
+               0.02 * (D(v(t, x, y), (x, 2)) + D(v(t, x, y), (y, 2))))
         ], [u(t, x, y), v(t, x, y)], [t, x, y]),
         "disc": [
             thalassa.fdm_simple_partial_derivative(D(u(t, x, y), t), 0.001, method='forward'),
@@ -105,10 +108,24 @@ probs = [
     }
 ]
 
+
+def generate_ics(dir_path):
+    import numpy as np
+    np.save(f'{dir_path}/1d_sin.npy', np.sin(np.pi * np.linspace(0, 1, 65)))
+    np.save(f'{dir_path}/2d_sin.npy',
+            np.sin(np.pi * np.linspace(0, 1, 65))[:, None] * np.sin(np.pi * np.linspace(0, 1, 65)))
+    np.save(f'{dir_path}/2d_sin_2.npy',
+            np.sin(8 * np.pi * np.linspace(0, 1, 65))[:, None] * np.sin(2 * np.pi * np.linspace(0, 1, 65)))
+    np.save(f'{dir_path}/1d_expsquare.npy', np.exp(-((np.linspace(0, 1, 65) - 0.5) ** 2) / 0.01))
+    np.save(f'{dir_path}/2d_expsquare.npy', np.exp(-((np.linspace(0, 1, 65) - 0.5) ** 2) / 0.01)[:, None] * np.exp(
+        -((np.linspace(0, 1, 65) - 0.5) ** 2) / 0.01))
+
+
 if __name__ == '__main__':
     problem_dir = "generated-code"
     if not os.path.exists(problem_dir):
         os.makedirs(problem_dir)
+    generate_ics(problem_dir)
     for prob in probs:
         file_name = f"{problem_dir}/{prob['name'].replace('-', '_')}.py"
         with open(file_name, 'w') as prob_generated_code:
