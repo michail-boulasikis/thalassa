@@ -1,4 +1,6 @@
 import functools
+import pprint
+
 import sympy
 import itertools
 import copy
@@ -99,7 +101,7 @@ class DiscretizePDESystemPhase(FrontEndPhase):
             return
         # Sort the discretizations by the order of the derivative expression, this is important, otherwise sympy
         # will not be able to substitute the derivatives correctly
-        self.frontend.discretizations.sort(key=lambda d: sum(d.order))
+        self.frontend.discretizations.sort(key=lambda d: sum(d.order), reverse=True)
         # Discretize the PDE system
         for i, eq in enumerate(self.frontend.pde_system.equations):
             for d in self.frontend.discretizations:
@@ -295,7 +297,6 @@ class PrepareOutputsPhase(FrontEndPhase):
                 for u in self.frontend.pde_system.unknowns
                 for i in list(range(0, -max([d.order[0] for d in outputs['disc'] if d.base_func.name == u.name]), -1))
             ]
-            print(outputs)
             orders.extend([
                 (k, aux['expr']) for k, v in outputs['instr'].items() for aux in v['aux']
             ])

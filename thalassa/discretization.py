@@ -54,7 +54,7 @@ class FDApproximationTaylor(FDApproximation):
         self.dx = dx
 
     @cached_property
-    def _weights(self):
+    def weights(self):
         c_vectors = []
         taylor_coeff = scipy.special.factorial(np.sum(self.order)) / np.prod(np.power(self.dx, self.order))
         for var, (start, stop, order) in enumerate(zip(self.imin, self.imax, self.order)):
@@ -81,8 +81,8 @@ class FDApproximationTaylor(FDApproximation):
 
     @property
     def fdm_expr(self):
-        return sum(self._weights[i] * sympy.Indexed(self.base_func.name, *(np.array(i) + self.imin)) for i in
-                   np.ndindex(*self._weights.shape))
+        return sum(self.weights[i] * sympy.Indexed(self.base_func.name, *(np.array(i) + self.imin)) for i in
+                   np.ndindex(*self.weights.shape))
 
     def __str__(self):
         return f"{self.derivative_expr} ==> {self.fdm_expr}"

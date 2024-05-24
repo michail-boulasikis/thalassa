@@ -1,8 +1,9 @@
+import functools
 from abc import ABC, abstractmethod
 from multipledispatch import dispatch
+import numpy as np
 import sympy
 import itertools
-
 import thalassa
 
 
@@ -157,16 +158,20 @@ class BackEndPhase(ABC):
 
 
 class EmitPreambleCodePhase(BackEndPhase):
-    def __init__(self, backend, enabled=True, plot=False):
+    def __init__(self, backend, enabled=True, plot=False, ics='external'):
         super().__init__("emit_preamble",
                          "Emits code which includes pytorch libraries and matplotlib if plot is specified.", backend,
                          enabled)
         self.plot = plot
+        self.ics = ics
 
     def __call__(self):
         if not self.enabled:
             return
         code = self.backend.preamble_code
+        if self.ics == 'external':
+            code.emit("import sys")
+            code.emit("import numpy as np")
         code.emit("import torch")
         code.emit("import torch.nn.functional as F")
         if self.plot:
@@ -214,18 +219,219 @@ class EmitAuxiliaryFeaturesPhase(BackEndPhase):
             code.emit_func(feature_func, expr, torch_jit=self.torch_jit)
 
 
+def _find_iminmax(disc):
+    imin = np.zeros(len(disc[0].order), dtype=int) + 100
+    imax = np.zeros(len(disc[0].order), dtype=int) - 100
+    for d in disc:
+        imin = np.minimum(imin, d.imin)
+        imax = np.maximum(imax, d.imax)
+    return imin, imax
+
+
+class CalculateStencilShapePhase(BackEndPhase):
+    def __init__(self, backend, enabled=True, use_conv=True):
+        super().__init__("calculate_stencil", "Calculates the stencil for the PDE.", backend, enabled)
+        self.use_conv = use_conv
+
+    def __call__(self):
+        if not (self.enabled and self.use_conv):
+            return
+        disc = self.backend.ir['disc']
+        # NOTE: The assumption here is that all variables have the same number of dimensions
+        imin, imax = _find_iminmax(disc)
+        stencil_shape = [len(self.backend.ir['pdes'].unknowns)] + (imax - imin + 1).tolist()
+        # NOTE: To fix, this assumes that every equation has the order in time
+        stencil_shape[1] = (stencil_shape[1] - 1) * len(self.backend.ir['pdes'].unknowns)
+        # Auxiliary features will lie in the same dimension as time, so that they fit in the channel dimension
+        stencil_shape[1] += sum(
+            len(v['aux']) for v in self.backend.ir['instr'].values() if type(v['aux']) is list)
+        stencil_shape.append(stencil_shape[1])
+        del stencil_shape[1]
+        self.backend.stencil = np.zeros(shape=stencil_shape)
+
+
+class CalculateStencilCoeffPhase(BackEndPhase):
+    def __init__(self, backend, enabled=True, use_conv=True):
+        super().__init__("calculate_stencil_coeff", "Calculates the stencil coefficients for the PDE.", backend,
+                         enabled)
+        self.use_conv = use_conv
+
+    def __call__(self):
+        if not (self.enabled and self.use_conv):
+            return
+        disc = self.backend.ir['disc']
+        stencil = self.backend.stencil
+        eq_orders = [max([d.order[0] for d in disc if d.base_func.name == u_var.name]) for u_var in
+                     self.backend.ir['pdes'].unknowns]
+        aux_feature_count = 0
+        for u_var, comp in self.backend.ir['instr'].items():
+            linear_comp = comp['conv']
+            aux_features = comp['aux']
+            u_var_idx = list(map(lambda x: x.name, self.backend.ir['pdes'].unknowns)).index(u_var)
+            imin, imax = _find_iminmax(disc)
+            if linear_comp is not None and linear_comp != 0:
+                for term in sympy.Add.make_args(linear_comp):
+                    coeff = functools.reduce(lambda x, y: x * y,
+                                             [c for c in term.as_ordered_factors() if
+                                              c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
+                    index = [int(i) for i in list(term.atoms(sympy.Indexed)).pop().indices]
+                    stencil_idx = [u_var_idx] + [i - j for i, j in zip(index, imin)]
+                    stencil_idx.append(stencil_idx[1] + sum(eq_orders[:u_var_idx]))
+                    del stencil_idx[1]
+                    stencil[tuple(stencil_idx)] += coeff
+            if aux_features is not None and len(aux_features) > 0:
+                for i, features in enumerate(aux_features):
+                    stencil_idx = [u_var_idx] + [(i - j + 1) // 2 for i, j in zip(imax, imin)]
+                    stencil_idx.append(sum(eq_orders) + aux_feature_count)
+                    aux_feature_count += 1
+                    del stencil_idx[1]
+                    stencil[tuple(stencil_idx)] += features['c']
+        self.backend.stencil = stencil
+
+
+class EmitISLInitializationPhase(BackEndPhase):
+    def __init__(self, backend, enabled=True, has_conv=True):
+        super().__init__("emit_isl_initialization",
+                         "Emits code for initializing the ISL context (i.e., before the loop starts).",
+                         backend, enabled)
+        self.has_conv = has_conv
+
+    def __call__(self):
+        if not self.enabled:
+            return
+        code = self.backend.isl_code
+        code.emit("@torch.jit.script")
+        var_args = ', '.join([f"_{str(arg)}: torch.Tensor" for arg in self.backend.ir['pdes'].free_symbols])
+        code.emit(f"def _isl(_ics: torch.Tensor, _N: torch.Tensor, {var_args}) -> torch.Tensor:")
+        code.increase_indent()
+        code.emit(f"__feature_maps_shape = [{len(self.backend.ir['instr'])}] + [int(i) for i in _N[1:]]")
+        code.emit(f"__feature_maps = torch.zeros(__feature_maps_shape)")
+        if self.has_conv:
+            code.emit(f"__conv_kernel = torch.tensor({self.backend.stencil.tolist()})")
+            code.emit("__kernel_perm = [0] + list(range(len(_N), 0, -1))")
+            # Permute the stencil here too, so that it is in the correct format to reference its shape
+            self.backend.stencil = np.transpose(self.backend.stencil,
+                                                [0] + list(range(len(self.backend.stencil.shape) - 1, 0, -1)))
+            code.emit("__conv_kernel = torch.permute(__conv_kernel, __kernel_perm)")
+        code.emit("for _i in range(int(_ics.size(0))):")
+        code.increase_indent()
+        code.emit(f"__feature_maps[_i] = _ics[_i]")
+        code.decrease_indent()
+
+
+class EmitISLCodePhase(BackEndPhase):
+    def __init__(self, backend, enabled=True, has_conv=True):
+        super().__init__("emit_isl_code", "Emits code for the ISL loop.", backend, enabled)
+        self.has_conv = has_conv
+
+    def __call__(self):
+        if not self.enabled:
+            return
+        code = self.backend.isl_code
+        code.emit("for _i in range(int(_N[0])):")
+        code.increase_indent()
+        for i, _ in enumerate(self.backend.ir['order']):
+            code.emit(f"__feature_maps[{i}, ...] = __feature_{i}("
+                      f"{', '.join([f'__feature_maps[{k}]' for k in range(len(self.backend.ir['pdes'].unknowns))])}, "
+                      f"{', '.join(map(lambda x: f'_{x}', self.backend.ir['pdes'].free_symbols))})")
+        if self.has_conv:
+            code.emit(
+                f"_tmp = F.conv{len(self.backend.ir['pdes'].free_symbols) - 1}d"
+                f"(__feature_maps[None, ...], __conv_kernel)")
+
+
+class EmitBoundaryConditionsPhase(BackEndPhase):
+    def __init__(self, backend, enabled=True, has_conv=True):
+        super().__init__("emit_boundary_conditions", "Emits code for the boundary conditions.", backend, enabled)
+        self.has_conv = has_conv
+
+    def __call__(self):
+        if not self.enabled:
+            return
+        code = self.backend.isl_code
+        if self.has_conv:
+            for j in range(len(self.backend.ir['pdes'].unknowns)):
+                code.emit(f"_tmp_{j} = _tmp[0, {j}, ...]")
+                padding_shape = [(self.backend.stencil.shape[i] // 2, self.backend.stencil.shape[i] // 2) for i in
+                                 range(2, len(self.backend.stencil.shape))]
+                padding_shape = list(itertools.chain(*padding_shape))
+                code.emit(f"_tmp_{j} = F.pad(_tmp_{j}, {padding_shape}, value=0.)")
+                code.emit(f"__feature_maps[{j}, ...] = _tmp_{j}")
+        code.decrease_indent()
+        code.emit(f"return __feature_maps[:{len(self.backend.ir['pdes'].unknowns)}, ...]")
+        code.decrease_indent()
+
+
+class EmitMainFunctionPhase(BackEndPhase):
+    def __init__(self, backend, enabled=True, ics='external', plot=False, sol_hypercube=None):
+        super().__init__("emit_main_function", "Emits code for the main function.", backend, enabled)
+        self.ics = ics
+        self.plot = plot
+        self.sol_hypercube = sol_hypercube
+
+    def __call__(self):
+        if not self.enabled:
+            return
+        code = self.backend.main_func_code
+        code.emit("def main():")
+        code.increase_indent()
+        if self.sol_hypercube is not None:
+            code.emit(f"_N = torch.tensor({list(self.sol_hypercube)}, dtype=torch.int32)")
+        else:
+            code.emit(
+                f"_N = torch.tensor([{', '.join([str(65)] * len(self.backend.ir['pdes'].free_symbols))}], dtype=torch.int32)")
+        code.emit(f"_dt = 1 / (_N - 1)")
+        for i, v in enumerate(self.backend.ir['pdes'].free_symbols):
+            code.emit(f"_{v} = torch.linspace(0, 1, int(_N[{i}]))")
+        code.emit(
+            f"_ic = torch.zeros(({len(self.backend.ir['pdes'].unknowns)}, "
+            f"{', '.join([f'_N[{i}]' for i in range(1, len(self.backend.ir['pdes'].free_symbols))])}))")
+        if self.ics == 'external':
+            for i, _ in enumerate(self.backend.ir['pdes'].unknowns):
+                code.emit(f"_ic[{i}, ...] = np.load(sys.argv[{i + 1}])")
+        code.emit(f"result = _isl(_ic, _N, {', '.join([f'_{i}' for i in self.backend.ir['pdes'].free_symbols])})")
+        if self.plot:
+            dims = len(self.backend.ir['pdes'].free_symbols) - 1
+            plot_type = len(self.backend.ir['pdes'].unknowns)
+            if dims == 3:
+                code.emit("\033[93mWarning:\033[0m 3D plots are not supported.")
+            if plot_type == 1:
+                if dims == 1:
+                    code.emit(f"plt.plot(_{self.backend.ir['pdes'].free_symbols[1]}.numpy(), result[0, ...].numpy())")
+                elif dims == 2:
+                    code.emit(f"plt.imshow(result[0, ...].numpy())")
+                    code.emit("plt.colorbar()")
+            elif plot_type == 2:
+                if dims == 1:
+                    code.emit(f"plt.plot(_{self.backend.ir['pdes'].free_symbols[1]}.numpy(), result[0, ...].numpy())")
+                    code.emit(f"plt.plot(_{self.backend.ir['pdes'].free_symbols[1]}.numpy(), result[1, ...].numpy())")
+                elif dims == 2:
+                    code.emit(
+                        f"plt.quiver(_{self.backend.ir['pdes'].free_symbols[1]}.numpy(), _{self.backend.ir['pdes'].free_symbols[2]}.numpy(), "
+                        f"result[0, ...].numpy(), result[1, ...].numpy())")
+            code.emit("plt.show()")
+
+
 class PytorchPDEBackEnd(object):
     def __init__(self, ir, **kwargs):
         self.ir = ir
+        self.stencil = None
         self.preamble_code = CodeEmitter()
         self.free_function_code = CodeEmitter()
         self.aux_feature_code = CodeEmitter()
         self.isl_code = CodeEmitter()
         self.main_func_code = CodeEmitter()
         self.phases = [
-            EmitPreambleCodePhase(self, True, kwargs.get('plot', False)),
+            EmitPreambleCodePhase(self, True, kwargs.get('plot', True), kwargs.get('ics', 'external')),
             EmitFreeFunctionsPhase(self, True, kwargs.get('funcs', {}), kwargs.get("torch_jit", True)),
-            EmitAuxiliaryFeaturesPhase(self, True)
+            EmitAuxiliaryFeaturesPhase(self, True),
+            CalculateStencilShapePhase(self, kwargs.get('use_conv', True)),
+            CalculateStencilCoeffPhase(self, kwargs.get('use_conv', True)),
+            EmitISLInitializationPhase(self, True, kwargs.get('use_conv', True)),
+            EmitISLCodePhase(self, True, kwargs.get('use_conv', True)),
+            EmitBoundaryConditionsPhase(self, True, kwargs.get('use_conv', True)),
+            EmitMainFunctionPhase(self, True, kwargs.get('ics', 'external'), kwargs.get('plot', True),
+                                  kwargs.get('sol_hypercube', None))
         ]
 
     def execute(self):

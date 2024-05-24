@@ -3,8 +3,8 @@ import thalassa
 from sympy import Eq
 from sympy import Derivative as D
 import sympy
-import sys
-import argparse
+import os
+
 
 t, x, y = sympy.symbols('t x y')
 u, v = sympy.Function('u'), sympy.Function('v')
@@ -107,6 +107,8 @@ probs = [
 
 if __name__ == '__main__':
     problem_dir = "generated-code"
+    if not os.path.exists(problem_dir):
+        os.makedirs(problem_dir)
     for prob in probs:
         file_name = f"{problem_dir}/{prob['name'].replace('-', '_')}.py"
         with open(file_name, 'w') as prob_generated_code:
