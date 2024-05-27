@@ -9,7 +9,7 @@ u = Function('u')(t, x)
 f = Function('f')
 
 pde = thalassa.PDESystem(
-    # Transport equation (*$u_t + u_x = 0$*), in a list to allow for multiple equations
+    # Transport equation (*$u_t + f(x) * u_x = 0$*), in a list to allow for multiple equations
     [Eq(D(u, t) + f(x) * D(u, x), 0)],
     # Unknown function(s) in the equation
     [u],
