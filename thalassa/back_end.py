@@ -306,9 +306,9 @@ class EmitISLInitializationPhase(BackEndPhase):
         code.emit(f"def _isl(_ics: torch.Tensor, _N: torch.Tensor, {var_args}) -> torch.Tensor:")
         code.increase_indent()
         code.emit(f"__feature_maps_shape = [{len(self.backend.ir['order'])}] + [int(i) for i in _N[1:]]")
-        code.emit(f"__feature_maps = torch.zeros(__feature_maps_shape)")
+        code.emit(f"__feature_maps = torch.zeros(__feature_maps_shape, dtype={self.backend.tensor_type})")
         if self.has_conv:
-            code.emit(f"__conv_kernel = torch.tensor({self.backend.stencil.tolist()})")
+            code.emit(f"__conv_kernel = torch.tensor({self.backend.stencil.tolist()}, dtype={self.backend.tensor_type})")
             code.emit("__kernel_perm = [0] + list(range(len(_N), 0, -1))")
             # Permute the stencil here too, so that it is in the correct format to reference its shape
             self.backend.stencil = np.transpose(self.backend.stencil,
@@ -393,13 +393,14 @@ class EmitMainFunctionPhase(BackEndPhase):
                 f"_N = torch.tensor([{', '.join([str(65)] * len(self.backend.ir['pdes'].free_symbols))}], dtype=torch.int32)")
         code.emit(f"_dt = 1 / (_N - 1)")
         for i, v in enumerate(self.backend.ir['pdes'].free_symbols):
-            code.emit(f"_{v} = torch.linspace(0, 1, int(_N[{i}]))")
+            code.emit(f"_{v} = torch.linspace(0, 1, int(_N[{i}]), dtype={self.backend.tensor_type})")
         code.emit(
             f"_ic = torch.zeros(({len(self.backend.ir['pdes'].unknowns)}, "
-            f"{', '.join([f'_N[{i}]' for i in range(1, len(self.backend.ir['pdes'].free_symbols))])}))")
+            f"{', '.join([f'_N[{i}]' for i in range(1, len(self.backend.ir['pdes'].free_symbols))])}), "
+            f"dtype={self.backend.tensor_type})")
         if self.ics == 'external':
             for i, _ in enumerate(self.backend.ir['pdes'].unknowns):
-                code.emit(f"_ic[{i}, ...] = torch.tensor(np.load(sys.argv[{i + 1}]))")
+                code.emit(f"_ic[{i}, ...] = torch.tensor(np.load(sys.argv[{i + 1}]), dtype={self.backend.tensor_type})")
         code.emit(f"result = _isl(_ic, _N, {', '.join([f'_{i}' for i in self.backend.ir['pdes'].free_symbols])})")
         if self.plot:
             dims = len(self.backend.ir['pdes'].free_symbols) - 1
@@ -430,6 +431,7 @@ class PytorchPDEBackEnd(object):
     def __init__(self, ir, **kwargs):
         self.ir = ir
         self.stencil = None
+        self.tensor_type = self._get_acc(kwargs.get('num_acc', 'f64'))
         self.feature_funcs = []
         self.preamble_code = CodeEmitter()
         self.free_function_code = CodeEmitter()
@@ -453,6 +455,25 @@ class PytorchPDEBackEnd(object):
         [phase() for phase in self.phases]
         return (f"{self.preamble_code}\n\n{self.free_function_code}\n"
                 f"{self.aux_feature_code}\n{self.isl_code}\n{self.main_func_code}")
+
+    def _get_acc(self, acc_str):
+        match acc_str:
+            case 'f16':
+                return "torch.float16"
+            case 'f32':
+                return "torch.float32"
+            case 'f64':
+                return "torch.float64"
+            case 'b16':
+                return "torch.bfloat16"
+            case 'e4m3':
+                return "torch.float8_e4m3fn"
+            case 'e5m2':
+                return "torch.float8_e5m2"
+            case _:
+                raise ValueError(f"Unknown floating-point accuracy {acc_str} provided to 'pde_compile'."
+                                 f" Supported types are: [f16, f32, f64, b16, e4m3, e5m2].")
+
 
 
 def pde_compile(pde, disc, **kwargs):
