@@ -105,6 +105,14 @@ probs = [
             thalassa.fdm_simple_partial_derivative(D(v(t, x, y), (x, 2)), 0.05, method='central'),
             thalassa.fdm_simple_partial_derivative(D(v(t, x, y), (y, 2)), 0.05, method='central'),
         ]
+    },
+    {
+        "name": "wave-equation",
+        "pde": thalassa.PDESystem([Eq(D(u(t, x), t, t) - D(u(t, x), x, x), 0)], [u(t, x)], [t, x]),
+        "disc": [
+            thalassa.fdm_simple_partial_derivative(D(u(t, x), t, t), 0.001, method='central'),
+            thalassa.fdm_simple_partial_derivative(D(u(t, x), x, x), 0.05, method='central')
+        ]
     }
 ]
 

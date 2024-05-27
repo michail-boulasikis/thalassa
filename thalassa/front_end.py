@@ -266,10 +266,10 @@ class FactorAuxiliaryFeaturesPhase(FrontEndPhase):
                 if aux_features:
                     if type(aux_features) is list:
                         for i, t in enumerate(aux_features):
-                            c = _pull_most_common_factor(t)
+                            c = _pull_most_common_factor(t.expand())
                             aux_features[i] = [c, sympy.nsimplify(t / c)]
                     else:
-                        c = _pull_most_common_factor(v[1])
+                        c = _pull_most_common_factor(v[1].expand())
                         aux_features = [[c, sympy.nsimplify(v[1] / c)]]
                     self.frontend.ir[k] = [v[0], aux_features]
 
@@ -293,12 +293,12 @@ class PrepareOutputsPhase(FrontEndPhase):
                 } for k, v in self.frontend.ir.items()
             }}
             orders = [
-                (u.name, sympy.Indexed(u.name, *([i] + [0] * len(u.args[1:]))))
+                (u.name, 1.0, sympy.Indexed(u.name, *([i] + [0] * len(u.args[1:]))))
                 for u in self.frontend.pde_system.unknowns
                 for i in list(range(0, -max([d.order[0] for d in outputs['disc'] if d.base_func.name == u.name]), -1))
             ]
             orders.extend([
-                (k, aux['expr']) for k, v in outputs['instr'].items() for aux in v['aux']
+                (k, aux['c'], aux['expr']) for k, v in outputs['instr'].items() for aux in v['aux']
             ])
             outputs['order'] = orders
             self.frontend.ir = outputs

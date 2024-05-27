@@ -213,7 +213,7 @@ class EmitAuxiliaryFeaturesPhase(BackEndPhase):
         if not self.enabled:
             return
         code = self.backend.aux_feature_code
-        for i, (u_var, expr) in enumerate(self.backend.ir['order']):
+        for i, (u_var, c, expr) in enumerate(self.backend.ir['order']):
             feature_func = sympy.Function(f'feature_{i}')(
                 *list(filter(lambda x: not isinstance(x, sympy.Indexed), expr.free_symbols)))
             self.backend.feature_funcs.append(feature_func)
@@ -333,9 +333,8 @@ class EmitISLCodePhase(BackEndPhase):
         code.increase_indent()
         for j, unk in enumerate(self.backend.ir['pdes'].unknowns):
             code.emit(f"_{unk.name} = __feature_maps[{j}, ...]")
-        for i, _ in enumerate(self.backend.ir['order']):
-            code.emit(f"__feature_maps[{i}, ...] = __feature_{i}("
-                      f"{', '.join([f'_{str(arg)}' for arg in self.backend.feature_funcs[i].args])})")
+        for i, ft in enumerate(self.backend.feature_funcs):
+            code.emit(f"__feature_maps[{i}, ...] = __feature_{i}({', '.join([f'_{str(arg)}' for arg in ft.args])})")
         if self.has_conv:
             code.emit(
                 f"_tmp = F.conv{len(self.backend.ir['pdes'].free_symbols) - 1}d"
@@ -359,6 +358,16 @@ class EmitBoundaryConditionsPhase(BackEndPhase):
                 padding_shape = list(itertools.chain(*padding_shape))
                 code.emit(f"_tmp_{j} = F.pad(_tmp_{j}, {padding_shape}, value=0.)")
                 code.emit(f"__feature_maps[{j}, ...] = _tmp_{j}")
+        else:
+            # Add together the different aux features for each variable and assign them to the feature maps
+            for unk in self.backend.ir['pdes'].unknowns:
+                # Collect the features for the unknown
+                unk_index = self.backend.ir['pdes'].unknowns.index(unk)
+                max_order_in_time = max([d.order[0] for d in self.backend.ir['disc'] if d.base_func.name == unk.name])
+                feat_indices = [(j, c) for j, (u, c, expr) in enumerate(self.backend.ir['order']) if u == unk.name]
+                feat_indices = feat_indices[max_order_in_time:]
+                code.emit(
+                    f"__feature_maps[{unk_index}, ...] = {' + '.join([f'({c} * __feature_maps[{i}, ...])' for i, c in feat_indices])}")
         code.decrease_indent()
         code.emit(f"return __feature_maps[:{len(self.backend.ir['pdes'].unknowns)}, ...]")
         code.decrease_indent()
