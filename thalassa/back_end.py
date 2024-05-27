@@ -216,6 +216,7 @@ class EmitAuxiliaryFeaturesPhase(BackEndPhase):
         for i, (u_var, expr) in enumerate(self.backend.ir['order']):
             feature_func = sympy.Function(f'feature_{i}')(
                 *list(filter(lambda x: not isinstance(x, sympy.Indexed), expr.free_symbols)))
+            self.backend.feature_funcs.append(feature_func)
             code.emit_func(feature_func, expr, torch_jit=self.torch_jit)
 
 
@@ -304,7 +305,7 @@ class EmitISLInitializationPhase(BackEndPhase):
         var_args = ', '.join([f"_{str(arg)}: torch.Tensor" for arg in self.backend.ir['pdes'].free_symbols])
         code.emit(f"def _isl(_ics: torch.Tensor, _N: torch.Tensor, {var_args}) -> torch.Tensor:")
         code.increase_indent()
-        code.emit(f"__feature_maps_shape = [{len(self.backend.ir['instr'])}] + [int(i) for i in _N[1:]]")
+        code.emit(f"__feature_maps_shape = [{len(self.backend.ir['order'])}] + [int(i) for i in _N[1:]]")
         code.emit(f"__feature_maps = torch.zeros(__feature_maps_shape)")
         if self.has_conv:
             code.emit(f"__conv_kernel = torch.tensor({self.backend.stencil.tolist()})")
@@ -330,10 +331,11 @@ class EmitISLCodePhase(BackEndPhase):
         code = self.backend.isl_code
         code.emit("for _i in range(int(_N[0])):")
         code.increase_indent()
+        for j, unk in enumerate(self.backend.ir['pdes'].unknowns):
+            code.emit(f"_{unk.name} = __feature_maps[{j}, ...]")
         for i, _ in enumerate(self.backend.ir['order']):
             code.emit(f"__feature_maps[{i}, ...] = __feature_{i}("
-                      f"{', '.join([f'__feature_maps[{k}]' for k in range(len(self.backend.ir['pdes'].unknowns))])}, "
-                      f"{', '.join(map(lambda x: f'_{x}', self.backend.ir['pdes'].free_symbols))})")
+                      f"{', '.join([f'_{str(arg)}' for arg in self.backend.feature_funcs[i].args])})")
         if self.has_conv:
             code.emit(
                 f"_tmp = F.conv{len(self.backend.ir['pdes'].free_symbols) - 1}d"
@@ -388,7 +390,7 @@ class EmitMainFunctionPhase(BackEndPhase):
             f"{', '.join([f'_N[{i}]' for i in range(1, len(self.backend.ir['pdes'].free_symbols))])}))")
         if self.ics == 'external':
             for i, _ in enumerate(self.backend.ir['pdes'].unknowns):
-                code.emit(f"_ic[{i}, ...] = np.load(sys.argv[{i + 1}])")
+                code.emit(f"_ic[{i}, ...] = torch.tensor(np.load(sys.argv[{i + 1}]))")
         code.emit(f"result = _isl(_ic, _N, {', '.join([f'_{i}' for i in self.backend.ir['pdes'].free_symbols])})")
         if self.plot:
             dims = len(self.backend.ir['pdes'].free_symbols) - 1
@@ -410,12 +412,16 @@ class EmitMainFunctionPhase(BackEndPhase):
                         f"plt.quiver(_{self.backend.ir['pdes'].free_symbols[1]}.numpy(), _{self.backend.ir['pdes'].free_symbols[2]}.numpy(), "
                         f"result[0, ...].numpy(), result[1, ...].numpy())")
             code.emit("plt.show()")
+        code.reset_indent()
+        code.emit("\n")
+        code.emit("main()")
 
 
 class PytorchPDEBackEnd(object):
     def __init__(self, ir, **kwargs):
         self.ir = ir
         self.stencil = None
+        self.feature_funcs = []
         self.preamble_code = CodeEmitter()
         self.free_function_code = CodeEmitter()
         self.aux_feature_code = CodeEmitter()
@@ -423,7 +429,7 @@ class PytorchPDEBackEnd(object):
         self.main_func_code = CodeEmitter()
         self.phases = [
             EmitPreambleCodePhase(self, True, kwargs.get('plot', True), kwargs.get('ics', 'external')),
-            EmitFreeFunctionsPhase(self, True, kwargs.get('funcs', {}), kwargs.get("torch_jit", True)),
+            EmitFreeFunctionsPhase(self, True, kwargs.get('funcs', {}), kwargs.get('torch_jit', True)),
             EmitAuxiliaryFeaturesPhase(self, True),
             CalculateStencilShapePhase(self, kwargs.get('use_conv', True)),
             CalculateStencilCoeffPhase(self, kwargs.get('use_conv', True)),
