@@ -85,6 +85,15 @@ class CodeEmitter(object):
             args.append(f"{self.symbol_stack.pop()}")
         self.emit(f"{res_name} = {_resolve_func_name(func)[1]}({', '.join(args)})")
 
+    @dispatch(sympy.Pow)
+    def emit(self, tree):
+        res_name = self.make_temp()
+        self.emit(tree.base)
+        self.emit(tree.exp)
+        base = self.symbol_stack.pop()
+        exp = self.symbol_stack.pop()
+        self.emit(f"{res_name} = torch.pow({base}, {exp})")
+
     @dispatch(sympy.Indexed)
     def emit(self, unk):
         res_name = self.make_temp()
