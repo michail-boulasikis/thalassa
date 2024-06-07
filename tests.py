@@ -115,7 +115,7 @@ def generate_ics(dir_path, cube_sz=65):
     np.save(f'{dir_path}/2d_sin.npy',
             np.sin(np.pi * np.linspace(0, 1, cube_sz))[:, None] * np.sin(np.pi * np.linspace(0, 1, cube_sz)))
     np.save(f'{dir_path}/2d_sin_2.npy',
-            np.sin(8 * np.pi * np.linspace(0, 1, cube_sz))[:, None] * np.sin(2 * np.pi * np.linspace(0, 1, cube_sz)))
+            np.sin(2 * np.pi * np.linspace(0, 1, cube_sz))[:, None] * np.sin(2 * np.pi * np.linspace(0, 1, cube_sz)))
     np.save(f'{dir_path}/1d_expsquare.npy', np.exp(-((np.linspace(0, 1, cube_sz) - 0.5) ** 2) / 0.01))
     np.save(f'{dir_path}/2d_expsquare.npy', np.exp(-((np.linspace(0, 1, cube_sz) - 0.5) ** 2) / 0.01)[:, None] * np.exp(
         -((np.linspace(0, 1, cube_sz) - 0.5) ** 2) / 0.01))
