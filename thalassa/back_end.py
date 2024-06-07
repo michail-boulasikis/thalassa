@@ -90,8 +90,8 @@ class CodeEmitter(object):
         res_name = self.make_temp()
         self.emit(tree.base)
         self.emit(tree.exp)
-        base = self.symbol_stack.pop()
         exp = self.symbol_stack.pop()
+        base = self.symbol_stack.pop()
         self.emit(f"{res_name} = torch.pow({base}, {exp})")
 
     @dispatch(sympy.Indexed)
