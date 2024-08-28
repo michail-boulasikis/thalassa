@@ -354,7 +354,7 @@ class PrepareOutputsPhase(FrontEndPhase):
         if not self.enabled:
             return
         if self.frontend.ir:
-            outputs = {'pdes': self.frontend.pde_system_unchanged, 'disc': self.frontend.discretizations, 'instr': {
+            outputs = {'pdes': self.frontend.pde_system, 'disc': self.frontend.discretizations, 'instr': {
                 k.base.name: {
                     'conv': v[0],
                     'aux': [{
