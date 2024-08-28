@@ -5,7 +5,7 @@ import sympy
 import itertools
 import copy
 
-from thalassa import discretization
+import thalassa
 from abc import ABC, abstractmethod
 
 
@@ -56,6 +56,76 @@ class SimplifyDerivativesPhase(FrontEndPhase):
     def __call__(self):
         if self.enabled:
             self.frontend.pde_system.equations = [eq.simplify() for eq in self.frontend.pde_system.equations]
+
+
+class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
+    def __init__(self, frontend, enabled=True, dt=0.01):
+        super().__init__("turn_into_first_order_system",
+                         "Turn the PDE system into a first order PDE system in time by introducing new variables",
+                         frontend, enabled)
+        self.dt = dt
+
+    def __call__(self):
+        derivs = [elem for elems in
+                  list(map(lambda x: [(sum(z == self.frontend.pde_system.free_symbols[0] for z in y.variables), y.expr)
+                                      for y in x],
+                           [eq.atoms(sympy.Derivative) for eq in self.frontend.pde_system.equations])) for elem in
+                  elems]
+        # Grouping the tuples by unknown
+        derivs = [list(filter(lambda x: x[1] == unk, derivs)) for unk in self.frontend.pde_system.unknowns]
+        # Finding the maximum order of each unknown
+        max_order = [max(d, key=lambda x: x[0]) for d in derivs]
+        # Filtering the unknowns which have order < 2
+        max_order = list(filter(lambda x: x[0] >= 2, max_order))
+        max_order = {e[1]: e[0] for e in max_order}
+        # Introduce new variables
+        new_vars = [
+            [k, *[sympy.Function(f'{k.name}_{i + 1}')(*self.frontend.pde_system.free_symbols) for i in range(v - 1)]]
+            for k, v in
+            max_order.items()]
+        # If we have only first order derivatives, return the system as is
+        if not new_vars:
+            return self.frontend.pde_system
+        new_vars = {e[0]: e for e in new_vars}
+        new_eqs = [sympy.Eq(sympy.Derivative(nv[idx - 1], self.frontend.pde_system.free_symbols[0]), var) for _, nv in
+                   new_vars.items() for
+                   idx, var in enumerate(nv) if idx > 0]
+        # Equation substitutions with new variables
+        for i, eq in enumerate(self.frontend.pde_system.equations):
+            # Find the time derivatives in the equation
+            substitutions = {}
+            eq_time_derivs = list(filter(
+                lambda x: self.frontend.pde_system.free_symbols[0] in x.variables
+                          and sum(z == self.frontend.pde_system.free_symbols[0] for z in x.variables) >= 1,
+                eq.atoms(sympy.Derivative)))
+            for d in eq_time_derivs:
+                # Special case when the time derivative is of maximum order
+                # (replaced with derivative of last new variable)
+                if sum(z == self.frontend.pde_system.free_symbols[0] for z in d.variables) == max_order[d.expr]:
+                    new_var = sympy.Derivative(new_vars[d.expr][-1], self.frontend.pde_system.free_symbols[0])
+                # General case (replaced with new variable)
+                else:
+                    new_var = new_vars[d.expr][sum(z == self.frontend.pde_system.free_symbols[0] for z in d.variables)]
+                substitutions[d] = new_var
+            self.frontend.pde_system.equations[i] = eq.subs(substitutions)
+        # Constructing the time discretizations for all variables
+        time_discs = [
+            thalassa.fdm_simple_partial_derivative(sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt,
+                                          method='forward')
+            for k in new_vars.keys()]
+        for _, v in new_vars.items():
+            time_discs.extend([thalassa.fdm_simple_partial_derivative(
+                sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt, method='backward') for k in
+                               v[1:]])
+        # Add new variables to the system in order (u, u_1, u_2, ... , v, v_1, v_2, ...)
+        # This is necessary because the order of unknowns is the order of supplied initial conditions
+        self.frontend.pde_system.unknowns = [[k, *v[1:]] for k, v in new_vars.items()]
+        # Flatten the list
+        self.frontend.pde_system.unknowns = [item for sublist in self.frontend.pde_system.unknowns for item in sublist]
+        # Add new equations to the system
+        self.frontend.pde_system.equations.extend(new_eqs)
+        # Add new discretizations to the system
+        self.frontend.discretizations.extend(time_discs)
 
 
 class VerifyDiscretizationsPhase(FrontEndPhase):
@@ -113,6 +183,7 @@ class DiscretizePDESystemPhase(FrontEndPhase):
                 unk_d = sympy.Indexed(unk.name, *[0] * len(unk.args))
                 eq = eq.subs(unk, unk_d)
             self.frontend.pde_system.equations[i] = eq
+        print(f"{self.frontend.pde_system.equations=}")
 
 
 class SolveForNextTimestepPhase(FrontEndPhase):
@@ -309,7 +380,7 @@ class PDEFrontEnd(object):
     def __init__(self, pde_system, discretizations, **kwargs):
         self.pde_system = copy.deepcopy(pde_system)
         self.pde_system_unchanged = copy.deepcopy(pde_system)
-        if not all(isinstance(d, discretization.FDApproximation) for d in discretizations):
+        if not all(isinstance(d, thalassa.discretization.FDApproximation) for d in discretizations):
             raise ValueError("Discretizations must be FDApproximation objects")
         if not discretizations:
             raise ValueError("At least one discretization must be provided")
@@ -319,6 +390,7 @@ class PDEFrontEnd(object):
         self.ir = None
         self.phases = [
             SimplifyDerivativesPhase(self, True),
+            TurnIntoFirstOrderSystemPhase(self, True, kwargs.get('dt', 0.01)),
             VerifyDiscretizationsPhase(self, True),
             DiscretizePDESystemPhase(self, True),
             SolveForNextTimestepPhase(self, True),

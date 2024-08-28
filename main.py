@@ -8,21 +8,20 @@ u = Function('u')(t, x)
 
 pde = thalassa.PDESystem(
     [Eq(
-        D(u, t) + u * D(u, x), 0
+        D(u, (t, 2)) + D(u, (x, 2)), 0
     )],
     [u],
     [t, x]
 )
 
 disc = [
-    thalassa.fdm_simple_partial_derivative(D(u, t), dt := 0.0001, method='forward'),
-    thalassa.fdm_simple_partial_derivative(D(u, x), dx := 0.001, method='central')
+    thalassa.fdm_simple_partial_derivative(D(u, (x, 2)), dx := 0.001, method='central')
 ]
 np.save('1d_expsq.npy', np.exp(-(np.linspace(0, 1, int(1 / dx)) - 0.5) ** 2 * 100))
 
 with open('burgers.py', 'w') as output_file:
     code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', plot=True,
-                                sol_hypercube=[1000, int(1 / dx)])
+                                sol_hypercube=[1000, int(1 / dx)], dt=0.01)
     output_file.write(code)
 
 
