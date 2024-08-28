@@ -83,9 +83,9 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
             [k, *[sympy.Function(f'{k.name}_{i + 1}')(*self.frontend.pde_system.free_symbols) for i in range(v - 1)]]
             for k, v in
             max_order.items()]
-        # If we have only first order derivatives, return the system as is
+        # If we have only first order derivatives, return as is
         if not new_vars:
-            return self.frontend.pde_system
+            return
         new_vars = {e[0]: e for e in new_vars}
         new_eqs = [sympy.Eq(sympy.Derivative(nv[idx - 1], self.frontend.pde_system.free_symbols[0]), var) for _, nv in
                    new_vars.items() for
@@ -115,7 +115,7 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
             for k in new_vars.keys()]
         for _, v in new_vars.items():
             time_discs.extend([thalassa.fdm_simple_partial_derivative(
-                sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt, method='backward') for k in
+                sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt, method='forward') for k in
                                v[1:]])
         # Add new variables to the system in order (u, u_1, u_2, ... , v, v_1, v_2, ...)
         # This is necessary because the order of unknowns is the order of supplied initial conditions
@@ -124,6 +124,7 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
         self.frontend.pde_system.unknowns = [item for sublist in self.frontend.pde_system.unknowns for item in sublist]
         # Add new equations to the system
         self.frontend.pde_system.equations.extend(new_eqs)
+        print(f"{self.frontend.pde_system.equations=}")
         # Add new discretizations to the system
         self.frontend.discretizations.extend(time_discs)
 
@@ -183,7 +184,6 @@ class DiscretizePDESystemPhase(FrontEndPhase):
                 unk_d = sympy.Indexed(unk.name, *[0] * len(unk.args))
                 eq = eq.subs(unk, unk_d)
             self.frontend.pde_system.equations[i] = eq
-        print(f"{self.frontend.pde_system.equations=}")
 
 
 class SolveForNextTimestepPhase(FrontEndPhase):
@@ -203,8 +203,7 @@ class SolveForNextTimestepPhase(FrontEndPhase):
         max_time_idx = {u: max([int(idxd.indices[0]) for idxd in indexed_vars if idxd.base.name == u], default=0)
                         for u in map(lambda x: x.name, self.frontend.pde_system.unknowns)}
         if any(max_time_idx[u.name] > 1 for u in self.frontend.pde_system.unknowns):
-            print("\033[93mWarning:\033[0m Next time step has an index greater than 1. "
-                  "Thalassa will shift the time steps to start from 1.")
+            print("\033[93mWarning:\033[0m Next time step has an index greater than 1.")
         # Create the variables we need to solve for
         next_time_step_vars = [sympy.Indexed(u.name, *([max_time_idx[u.name]] + [0] * (len(u.args) - 1))) for u in
                                self.frontend.pde_system.unknowns]
@@ -215,25 +214,7 @@ class SolveForNextTimestepPhase(FrontEndPhase):
                              f"It might be that the discretization is implicit "
                              f"or that the PDE is too complex for thalassa.")
         self.frontend.solved_pdes = solutions[0]
-
-
-class ShiftTimeStepsPhase(FrontEndPhase):
-    def __init__(self, frontend, enabled=True):
-        super().__init__("shift_time_steps",
-                         "Shifts the time steps to start from 1, if needed.",
-                         frontend, enabled)
-
-    def __call__(self):
-        if not self.enabled:
-            return
-        if self.frontend.solved_pdes:
-            # Shift the time steps to start from 1
-            for k, v in self.frontend.solved_pdes.items():
-                time_idx = int(k.indices[0])
-                if time_idx <= 1:
-                    continue
-                self.frontend.solved_pdes[k] = v.subs({idxd.indices[0]: idxd.indices[0] - time_idx + 1
-                                                       for idxd in v.atoms(sympy.Indexed)})
+        print(f"{self.frontend.solved_pdes=}")
 
 
 class RuleBasedExpressionOptimizationPhase(FrontEndPhase):
@@ -394,7 +375,6 @@ class PDEFrontEnd(object):
             VerifyDiscretizationsPhase(self, True),
             DiscretizePDESystemPhase(self, True),
             SolveForNextTimestepPhase(self, True),
-            ShiftTimeStepsPhase(self, True),
             RuleBasedExpressionOptimizationPhase(self, True),
             SplitConstNonConstPhase(self, kwargs.get('use_conv', True)),
             SplitAuxiliaryFeaturesPhase(self, True, kwargs.get('aux_split_strategy', 'memory')),

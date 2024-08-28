@@ -297,6 +297,7 @@ class CalculateStencilCoeffPhase(BackEndPhase):
                     del stencil_idx[1]
                     stencil[tuple(stencil_idx)] += features['c']
         self.backend.stencil = stencil
+        print(f"{stencil=}")
 
 
 class EmitISLInitializationPhase(BackEndPhase):
