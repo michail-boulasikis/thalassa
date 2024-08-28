@@ -110,7 +110,7 @@ def fdm_simple_partial_derivative(deriv: sympy.Derivative, dx: float, method='fo
         case 'forward':
             imax[var_idx] = order
         case 'backward':
-            imin[var_idx] = 1 - order
+            imin[var_idx] = - order
         case 'central':
             imax[var_idx] = (order + 1) // 2
             imin[var_idx] = - ((order + 1) // 2)
