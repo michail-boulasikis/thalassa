@@ -84,9 +84,16 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
             for k, v in
             max_order.items()]
         # If we have only first order derivatives, return as is
+        new_vars = {e[0]: e for e in new_vars}
+
+        time_discs = [
+            thalassa.fdm_simple_partial_derivative(sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]),
+                                                   self.dt,
+                                                   method='forward')
+            for k in new_vars.keys()]
+        self.frontend.discretizations.extend(time_discs)
         if not new_vars:
             return
-        new_vars = {e[0]: e for e in new_vars}
         new_eqs = [sympy.Eq(sympy.Derivative(nv[idx - 1], self.frontend.pde_system.free_symbols[0]), var) for _, nv in
                    new_vars.items() for
                    idx, var in enumerate(nv) if idx > 0]
@@ -109,10 +116,7 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
                 substitutions[d] = new_var
             self.frontend.pde_system.equations[i] = eq.subs(substitutions)
         # Constructing the time discretizations for all variables
-        time_discs = [
-            thalassa.fdm_simple_partial_derivative(sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt,
-                                          method='forward')
-            for k in new_vars.keys()]
+        time_discs = []
         for _, v in new_vars.items():
             time_discs.extend([thalassa.fdm_simple_partial_derivative(
                 sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt, method='forward') for k in

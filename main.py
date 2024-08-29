@@ -23,7 +23,7 @@ np.save('1d_zeros.npy', np.zeros(int(1 / dx)))
 
 with open('burgers.py', 'w') as output_file:
     code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', plot=True,
-                                sol_hypercube=[15000, int(1 / dx)], dt=0.00001)
+                                sol_hypercube=[10000, int(1 / dx)], dt=0.00001)
     output_file.write(code)
 
 
