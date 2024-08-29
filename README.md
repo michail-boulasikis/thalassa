@@ -8,6 +8,9 @@ Thalassa (from the Greek word Θάλασσα, meaning sea) is a Python package t
 - 2D versions of Burgers' equation and the advection-diffusion equation.
 - The Kolmogorov-Petrovsky-Piskunov (KPP) equation (u_t = u_xx + exp(u)) which has a non-linear term in u.
 - Equations with derivatives in non-linear functions, such as (u_t = u_xx + exp(u_x)).
+- Wave equations (u_tt = c^2 u_xx) which are second order in time and space.
+- Heat equations (u_t = a u_xx) which are second order in space.
+- Non-linear n-th order parabolic and hyperbolic PDEs.
 
 Thalassa can not yet solve the Navier-Stokes equation because of the pressure term. This is a future goal for the project.
 
