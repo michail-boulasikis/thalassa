@@ -271,33 +271,33 @@ class CalculateStencilCoeffPhase(BackEndPhase):
             return
         disc = self.backend.ir['disc']
         stencil = self.backend.stencil
-        eq_orders = [max([d.order[0] for d in disc if d.base_func.name == u_var.name]) for u_var in
-                     self.backend.ir['pdes'].unknowns]
         aux_feature_count = 0
+        unknown_names = list(map(lambda x: x.name, self.backend.ir['pdes'].unknowns))
+        n_vars = len(self.backend.ir['pdes'].unknowns)
         for u_var, comp in self.backend.ir['instr'].items():
             linear_comp = comp['conv']
             aux_features = comp['aux']
-            u_var_idx = list(map(lambda x: x.name, self.backend.ir['pdes'].unknowns)).index(u_var)
+            u_var_idx = unknown_names.index(u_var)
             imin, imax = _find_iminmax(disc)
             if linear_comp is not None and linear_comp != 0:
                 for term in sympy.Add.make_args(linear_comp):
+                    base_var_idx = unknown_names.index(term.atoms(sympy.Indexed).pop().base.name)
                     coeff = functools.reduce(lambda x, y: x * y,
                                              [c for c in term.as_ordered_factors() if
                                               c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
                     index = [int(i) for i in list(term.atoms(sympy.Indexed)).pop().indices]
                     stencil_idx = [u_var_idx] + [i - j for i, j in zip(index, imin)]
-                    stencil_idx.append(stencil_idx[1] + sum(eq_orders[:u_var_idx]))
+                    stencil_idx.append(stencil_idx[1] + base_var_idx)
                     del stencil_idx[1]
                     stencil[tuple(stencil_idx)] += coeff
             if aux_features is not None and len(aux_features) > 0:
                 for i, features in enumerate(aux_features):
                     stencil_idx = [u_var_idx] + [(i - j + 1) // 2 for i, j in zip(imax, imin)]
-                    stencil_idx.append(sum(eq_orders) + aux_feature_count)
+                    stencil_idx.append(n_vars + aux_feature_count)
                     aux_feature_count += 1
                     del stencil_idx[1]
                     stencil[tuple(stencil_idx)] += features['c']
         self.backend.stencil = stencil
-        print(f"{stencil=}")
 
 
 class EmitISLInitializationPhase(BackEndPhase):

@@ -124,7 +124,6 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
         self.frontend.pde_system.unknowns = [item for sublist in self.frontend.pde_system.unknowns for item in sublist]
         # Add new equations to the system
         self.frontend.pde_system.equations.extend(new_eqs)
-        print(f"{self.frontend.pde_system.equations=}")
         # Add new discretizations to the system
         self.frontend.discretizations.extend(time_discs)
 
@@ -214,7 +213,6 @@ class SolveForNextTimestepPhase(FrontEndPhase):
                              f"It might be that the discretization is implicit "
                              f"or that the PDE is too complex for thalassa.")
         self.frontend.solved_pdes = solutions[0]
-        print(f"{self.frontend.solved_pdes=}")
 
 
 class RuleBasedExpressionOptimizationPhase(FrontEndPhase):
