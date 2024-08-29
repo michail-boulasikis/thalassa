@@ -78,20 +78,20 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
         # Filtering the unknowns which have order < 2
         max_order = list(filter(lambda x: x[0] >= 2, max_order))
         max_order = {e[1]: e[0] for e in max_order}
+        time_discs = [
+            thalassa.fdm_simple_partial_derivative(sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]),
+                                                   self.dt,
+                                                   method='forward')
+            for k in max_order.keys()]
+        self.frontend.discretizations.extend(time_discs)
         # Introduce new variables
         new_vars = [
             [k, *[sympy.Function(f'{k.name}_{i + 1}')(*self.frontend.pde_system.free_symbols) for i in range(v - 1)]]
             for k, v in
             max_order.items()]
-        # If we have only first order derivatives, return as is
         new_vars = {e[0]: e for e in new_vars}
+        # If we have only first order derivatives, return as is
 
-        time_discs = [
-            thalassa.fdm_simple_partial_derivative(sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]),
-                                                   self.dt,
-                                                   method='forward')
-            for k in new_vars.keys()]
-        self.frontend.discretizations.extend(time_discs)
         if not new_vars:
             return
         new_eqs = [sympy.Eq(sympy.Derivative(nv[idx - 1], self.frontend.pde_system.free_symbols[0]), var) for _, nv in
