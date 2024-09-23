@@ -4,6 +4,7 @@ import pprint
 import sympy
 import itertools
 import copy
+import numpy as np
 
 import thalassa
 from abc import ABC, abstractmethod
@@ -58,6 +59,28 @@ class SimplifyDerivativesPhase(FrontEndPhase):
             self.frontend.pde_system.equations = [eq.simplify() for eq in self.frontend.pde_system.equations]
 
 
+class SubstituteFreeFunctionsPhase(FrontEndPhase):
+    def __init__(self, frontend, enabled=True, funcs=None):
+        super().__init__("substitute_free_functions",
+                         "Substitute free functions in the PDE system with the provided functions.",
+                         frontend, enabled)
+        self.funcs = funcs
+
+    def __call__(self):
+        if self.enabled and self.funcs:
+            self.frontend.pde_system.free_functions = []
+            for func, expr in self.funcs.items():
+                if expr != "external":
+                    self.frontend.pde_system.equations = [eq.subs(func, expr) for eq in
+                                                          self.frontend.pde_system.equations]
+                else:
+                    new_func = sympy.Function(func.name)(*func.args)
+                    self.frontend.pde_system.equations = [
+                        eq.subs(func, new_func) for eq in self.frontend.pde_system.equations]
+                    self.frontend.pde_system.free_functions.append(new_func)
+        self.frontend.pde_system.equations = [eq.simplify() for eq in self.frontend.pde_system.equations]
+
+
 class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
     def __init__(self, frontend, enabled=True, dt=0.01):
         super().__init__("turn_into_first_order_system",
@@ -79,10 +102,10 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
         max_order = list(filter(lambda x: x[0] >= 2, max_order))
         max_order = {e[1]: e[0] for e in max_order}
         time_discs = [
-            thalassa.fdm_simple_partial_derivative(sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]),
+            thalassa.fdm_simple_partial_derivative(sympy.Derivative(d[0][1], self.frontend.pde_system.free_symbols[0]),
                                                    self.dt,
                                                    method='forward')
-            for k in max_order.keys()]
+            for d in derivs]
         self.frontend.discretizations.extend(time_discs)
         # Introduce new variables
         new_vars = [
@@ -120,7 +143,7 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
         for _, v in new_vars.items():
             time_discs.extend([thalassa.fdm_simple_partial_derivative(
                 sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt, method='forward') for k in
-                               v[1:]])
+                v[1:]])
         # Add new variables to the system in order (u, u_1, u_2, ... , v, v_1, v_2, ...)
         # This is necessary because the order of unknowns is the order of supplied initial conditions
         self.frontend.pde_system.unknowns = [[k, *v[1:]] for k, v in new_vars.items()]
@@ -205,8 +228,6 @@ class SolveForNextTimestepPhase(FrontEndPhase):
                         if idxd.base.name in map(lambda x: x.name, self.frontend.pde_system.unknowns)]
         max_time_idx = {u: max([int(idxd.indices[0]) for idxd in indexed_vars if idxd.base.name == u], default=0)
                         for u in map(lambda x: x.name, self.frontend.pde_system.unknowns)}
-        if any(max_time_idx[u.name] > 1 for u in self.frontend.pde_system.unknowns):
-            print("\033[93mWarning:\033[0m Next time step has an index greater than 1.")
         # Create the variables we need to solve for
         next_time_step_vars = [sympy.Indexed(u.name, *([max_time_idx[u.name]] + [0] * (len(u.args) - 1))) for u in
                                self.frontend.pde_system.unknowns]
@@ -219,143 +240,171 @@ class SolveForNextTimestepPhase(FrontEndPhase):
         self.frontend.solved_pdes = solutions[0]
 
 
-class RuleBasedExpressionOptimizationPhase(FrontEndPhase):
-    def __init__(self, frontend, enabled=True):
-        super().__init__("rule_based_expression_optimization",
-                         "Optimizes the expressions for the next time steps using a set of rules, "
-                         "which is expected to reduce their computational overhead. "
-                         "Example applied rule: exp(x)*exp(y) -> exp(x + y). "
-                         "This phase is optional.",
+def _get_hypercube_range(term1, global_imin, global_imax):
+    indexed_vars = list(term1.atoms(sympy.Indexed))
+    if not indexed_vars:
+        return np.array([0] * len(global_imin)), np.array([0] * len(global_imin))
+    imin_vars = np.zeros(len(indexed_vars[0].indices[1:]), dtype=int) + 100
+    imax_vars = np.zeros(len(indexed_vars[0].indices[1:]), dtype=int) - 100
+    for idx in indexed_vars:
+        imin_vars = np.minimum(imin_vars, [int(i) for i in idx.indices[1:]])
+        imax_vars = np.maximum(imax_vars, [int(i) for i in idx.indices[1:]])
+    return global_imin - imin_vars, global_imax - imax_vars
+
+
+class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
+    def __init__(self, frontend, enabled=True, max_features=4):
+        super().__init__("create_auxiliary_features",
+                         "Creates auxiliary features for the PDE system. "
+                         "This phase is optional and takes a maximum number of features as an argument. "
+                         "By default, the maximum number of features is 4.",
                          frontend, enabled)
+        self.max_features = max_features
 
     def __call__(self):
         if not self.enabled:
             return
         if self.frontend.solved_pdes:
-            self.frontend.solved_pdes = {k: v.simplify() for k, v in self.frontend.solved_pdes.items()}
-
-
-class SplitConstNonConstPhase(FrontEndPhase):
-    def __init__(self, frontend, enabled=True):
-        super().__init__("split_const_non_const",
-                         "Splits the expressions for the next time steps into constant and non-constant parts. "
-                         "Constant parts are going to be handled with convolution. "
-                         "Non-constant parts will become auxiliary features. "
-                         "If this phase is disabled, all expressions will be treated as non-constant.",
-                         frontend, enabled)
-
-    def __call__(self):
-        if not self.enabled:
-            self.frontend.ir = {k: (0, v) for k, v in self.frontend.solved_pdes.items()}
-            return
-        if self.frontend.solved_pdes:
-            # Generate an intermediate representation (IR) of the PDE system
-            parts = {}
-            for k, v in self.frontend.solved_pdes.items():
-                expr_terms = sympy.Add.make_args(v.expand())
-                expr_terms_no_indices = [
-                    term.replace(lambda e: isinstance(e, sympy.Indexed), lambda e: sympy.Dummy(k.base.name))
-                    for term in expr_terms]
-                non_const_terms = [sympy.Poly(e).total_degree() > 1 or len(e.atoms(sympy.Function)) > 0 for e in
-                                   expr_terms_no_indices]
-                parts[k] = [
-                    sum([t for i, t in enumerate(expr_terms) if not non_const_terms[i]]),
-                    sum([t for i, t in enumerate(expr_terms) if non_const_terms[i]]) if any(
-                        nl for nl in non_const_terms) else 0
-                ]
-            self.frontend.ir = parts
-
-
-class SplitAuxiliaryFeaturesPhase(FrontEndPhase):
-    def __init__(self, frontend, enabled=True, split_strategy='memory'):
-        super().__init__("split_auxiliary_features",
-                         "Splits the auxiliary features of the PDE system, "
-                         "which are the non-constant parts of the expressions for the next time steps. "
-                         "This phase is optional, and takes a split strategy as an argument. "
-                         "By default, the strategy is 'memory', which means that the auxiliary features are "
-                         "kept as they are. "
-                         "If the strategy is 'depth', the auxiliary features are split as much as possible.",
-                         frontend, enabled)
-        self.split_strategy = split_strategy
-
-    def __call__(self):
-        if not self.enabled:
-            return
-        if self.frontend.ir:
-            match self.split_strategy:
-                case 'memory':
-                    pass
-                case 'depth':
-                    for k, v in self.frontend.ir.items():
-                        self.frontend.ir[k] = (v[0], [t.simplify() for t in sympy.Add.make_args(v[1])])
-                case _:
-                    raise ValueError("Invalid optimization strategy. "
-                                     "Valid strategies are 'memory' and 'depth'.")
-
-
-def _pull_most_common_factor(expr):
-    consts = [
-        [c for c in t.as_ordered_factors() if c.is_constant() and not isinstance(c, (sympy.Indexed, sympy.Function))]
-        for t in sympy.Add.make_args(expr)]
-    consts = [functools.reduce(lambda x, y: x * y, cs or [1.0]) for cs in consts]
-    c = max(set(consts), key=consts.count)
-    return c
-
-
-class FactorAuxiliaryFeaturesPhase(FrontEndPhase):
-    def __init__(self, frontend, enabled=True):
-        super().__init__("factor_auxiliary_features",
-                         "Pulls the most common factor out of the auxiliary features and normalizes the features. "
-                         "This saves some multiplications during the convolution. "
-                         "If there is no constant part in the expressions for the next time step, this phase is a NOP. "
-                         "This phase is optional.",
-                         frontend, enabled)
-
-    def __call__(self):
-        if not self.enabled:
-            return
-        if self.frontend.ir:
-            for k, v in self.frontend.ir.items():
-                aux_features = v[1]
-                if aux_features:
-                    if type(aux_features) is list:
-                        for i, t in enumerate(aux_features):
-                            c = _pull_most_common_factor(t.expand())
-                            aux_features[i] = [c, sympy.nsimplify(t / c)]
+            for unk, expr in self.frontend.solved_pdes.items():
+                # We expand the expression and get all terms. Then we factor out the constants from each term
+                # and sort the terms first by the number of indexed variables in each term and
+                # then by the absolute value of the sum of the indices in the indexed variables
+                # This is done to bring more "general" terms closer to the front,
+                # as well as terms which are more "centered".
+                expr_terms = sympy.Add.make_args(expr.expand())
+                consts = [functools.reduce(lambda x, y: x * y,
+                                           [c for c in t.as_ordered_factors() if
+                                            c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
+                          for t in expr_terms]
+                pure_terms = [(c, sympy.nsimplify(t / c)) for t, c in zip(expr_terms, consts)]
+                pure_terms_idxd = [(c, t, len(list(t.atoms(sympy.Indexed))), abs(sum(sum(x for x in i.indices[1:]) for i in list(t.atoms(sympy.Indexed)))))
+                                   for c, t in pure_terms]
+                pure_terms = [(c, t) for c, t, _, _ in sorted(pure_terms_idxd, key=lambda x: (x[2], x[3]))]
+                # We form a 2D array of matches between the terms. If two terms are equal up to a shift in the indices,
+                # we store the shift. If a term is not equal to any other term, we store None.
+                # The search space for the shifts is determined by the minimum and maximum indices
+                # of the indexed variables in the term as well as the limits of the discretization.
+                # This step is expected to be the most computationally expensive step, especially if the number of terms
+                # is large.
+                matches = [None] * len(pure_terms) * len(pure_terms)
+                imin, imax = _find_iminmax(self.frontend.discretizations)
+                imin = imin[1:]
+                imax = imax[1:]
+                for i in range(len(pure_terms)):
+                    for j in range(len(pure_terms)):
+                        if matches[i * len(pure_terms) + j] is not None:
+                            continue
+                        hypercube_range_min, hypercube_range_max = _get_hypercube_range(pure_terms[i][1], imin, imax)
+                        search_range = [r + 1 for r in hypercube_range_max - hypercube_range_min]
+                        for nidx in np.ndindex(*search_range):
+                            shft = nidx + hypercube_range_min
+                            t_idxd = list(pure_terms[i][1].atoms(sympy.Indexed))
+                            substitutions = {}
+                            for idxd in t_idxd:
+                                new_idxd = sympy.Indexed(idxd.base, *(
+                                        [idxd.indices[0]] + [i + j for i, j in zip(idxd.indices[1:], shft)]))
+                                substitutions[idxd] = new_idxd
+                            new_expr = pure_terms[i][1].subs(substitutions)
+                            diff = sympy.simplify(new_expr - pure_terms[j][1])
+                            if diff == 0:
+                                matches[i * len(pure_terms) + j] = shft
+                                matches[j * len(pure_terms) + i] = -shft
+                                break
+                # Turning the matches into a 2D array
+                matches = [matches[i:i + len(pure_terms)] for i in range(0, len(matches), len(pure_terms))]
+                # TODO: holy shit I have to fix this mess
+                first_not_none = [next((i for i, m in enumerate(match) if m is not None), None) for match in matches]
+                feature_dict = {}
+                prev_idx = -1
+                feature_idx = -1
+                current_feature = None
+                for i, m in enumerate(first_not_none):
+                    if prev_idx != m:
+                        feature_idx += 1
+                        current_feature = sympy.Indexed(f"F_{feature_idx}", *([0] * (len(imin) + 1)))
+                        feature_dict[current_feature] = [pure_terms[i][1], pure_terms[m][0] * current_feature,
+                                                         pure_terms[i][0] * pure_terms[i][1]]
+                        prev_idx = m
                     else:
-                        c = _pull_most_common_factor(v[1].expand())
-                        aux_features = [[c, sympy.nsimplify(v[1] / c)]]
-                    self.frontend.ir[k] = [v[0], aux_features]
+                        current_feature_with_offset = sympy.Indexed(
+                            f"F_{feature_idx}",*[current_feature.indices[0]] +
+                                      [x + y for x, y in zip(current_feature.indices[1:], matches[m][i])])
+                        feature_dict[current_feature][1] += pure_terms[i][0] * current_feature_with_offset
+                        feature_dict[current_feature][2] += pure_terms[i][1] * pure_terms[i][0]
+                feature_dict = [[k, v] for k, v in feature_dict.items()]
+                feature_dict = [[k, v] for k, v in sorted(
+                    feature_dict, key=lambda x: len(sympy.Add.make_args(x[1][1])), reverse=True)]
+                # Finally, we summarize the tailing features into a single feature, if the number of features exceeds
+                # the maximum number of features
+                if len(feature_dict) > self.max_features:
+                    remaining_features = feature_dict[self.max_features-1:]
+                    feature_dict = feature_dict[:self.max_features-1]
+                    summarizing_feature = sympy.Indexed(f"F_{self.max_features}", *([0] * (len(imin) + 1)))
+                    summarizing_feature_entry = [summarizing_feature, [sympy.Number(0),
+                                                                       summarizing_feature, sympy.Number(0)]]
+                    while remaining_features:
+                        fn, (f_expr, _, f_expr_all) = remaining_features.pop(0)
+                        summarizing_feature_entry[1][0] += f_expr_all
+                        summarizing_feature_entry[1][2] += f_expr_all
+                        # remove the feature from the remaining features
+                        remaining_features = [(k, v) for k, v in remaining_features if k != fn]
+                    feature_dict.append(summarizing_feature_entry)
+                self.frontend.ir[unk] = feature_dict
 
 
-class PrepareOutputsPhase(FrontEndPhase):
-    def __init__(self, frontend, enabled=True):
-        super().__init__("prepare_outputs", "Prepares and creates output products.",
+def _find_iminmax(disc):
+    imin = np.zeros(len(disc[0].order), dtype=int) + 100
+    imax = np.zeros(len(disc[0].order), dtype=int) - 100
+    for d in disc:
+        imin = np.minimum(imin, d.imin)
+        imax = np.maximum(imax, d.imax)
+    return imin, imax
+
+
+class ComputeStencilCoefficients(FrontEndPhase):
+    def __init__(self, frontend, enabled):
+        super().__init__("compute_stencil_coefficients",
+                         "Computes the coefficients for the stencil.",
                          frontend, enabled)
 
     def __call__(self):
         if not self.enabled:
             return
         if self.frontend.ir:
-            outputs = {'pdes': self.frontend.pde_system, 'disc': self.frontend.discretizations, 'instr': {
-                k.base.name: {
-                    'conv': v[0],
-                    'aux': [{
-                        'c': aux[0],
-                        'expr': aux[1]
-                    } for aux in v[1]] if type(v[1]) is list else {}
-                } for k, v in self.frontend.ir.items()
-            }}
-            orders = [
-                (u.name, 1.0, sympy.Indexed(u.name, *([i] + [0] * len(u.args[1:]))))
-                for u in self.frontend.pde_system.unknowns
-                for i in list(range(0, -max([d.order[0] for d in outputs['disc'] if d.base_func.name == u.name]), -1))
-            ]
-            orders.extend([
-                (k, aux['c'], aux['expr']) for k, v in outputs['instr'].items() for aux in v['aux']
-            ])
-            outputs['order'] = orders
-            self.frontend.ir = outputs
+            imin, imax = _find_iminmax(self.frontend.discretizations)
+            kernel_slice_shape = [imax[i] - imin[i] + 1 for i in range(len(imin))]
+            kernel_slice_shape = kernel_slice_shape[1:]
+            for k, v in self.frontend.ir.items():
+                for i, (f, (_, f_conv, _)) in enumerate(v):
+                    stencil_slice_const = np.zeros(kernel_slice_shape)
+                    for term in sympy.Add.make_args(f_conv):
+                        coeff = functools.reduce(lambda x, y: x * y,
+                                                 [c for c in term.as_ordered_factors() if
+                                                  c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
+                        idxd_list = list(term.atoms(sympy.Indexed))
+                        if not idxd_list:
+                            stencil_slice_const[(imax - imin) // 2] += coeff
+                        else:
+                            index = [int(i) for i in idxd_list.pop().indices[1:]]
+                            stencil_slice_const[tuple([i - j for i, j in zip(index, imin[1:])])] += coeff
+                    self.frontend.ir[k][i][1][1] = stencil_slice_const
+                    del self.frontend.ir[k][i][1][2]
+
+
+class PrepareIRPhase(FrontEndPhase):
+    def __init__(self, frontend, enabled):
+        super().__init__("prepare_ir",
+                         "Prepares the intermediate representation for the back end.",
+                         frontend, enabled)
+
+    def __call__(self):
+        if not self.enabled:
+            return
+        if self.frontend.ir:
+            self.frontend.ir = {
+                'pdes': self.frontend.pde_system,
+                'features': self.frontend.ir
+            }
 
 
 class PDEFrontEnd(object):
@@ -368,20 +417,20 @@ class PDEFrontEnd(object):
         if not discretizations:
             raise ValueError("At least one discretization must be provided")
         self.discretizations = discretizations
+        self.funcs = kwargs.get('funcs', None)
         self.solved_pdes = None
         self.shift_time_steps = False
-        self.ir = None
+        self.ir = {}
         self.phases = [
             SimplifyDerivativesPhase(self, True),
+            SubstituteFreeFunctionsPhase(self, True, funcs=self.funcs),
             TurnIntoFirstOrderSystemPhase(self, True, kwargs.get('dt', 0.01)),
             VerifyDiscretizationsPhase(self, True),
             DiscretizePDESystemPhase(self, True),
             SolveForNextTimestepPhase(self, True),
-            RuleBasedExpressionOptimizationPhase(self, True),
-            SplitConstNonConstPhase(self, kwargs.get('use_conv', True)),
-            SplitAuxiliaryFeaturesPhase(self, True, kwargs.get('aux_split_strategy', 'memory')),
-            FactorAuxiliaryFeaturesPhase(self, kwargs.get('pull_factors', True)),
-            PrepareOutputsPhase(self, True)
+            CreateAuxiliaryFeaturesPhase(self, True, kwargs.get('max_features', 3)),
+            ComputeStencilCoefficients(self, True),
+            PrepareIRPhase(self, True)
         ]
 
     def execute(self):
