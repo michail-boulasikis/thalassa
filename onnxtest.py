@@ -7,12 +7,21 @@ class PDEFeature0(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, u: torch.Tensor) -> torch.Tensor:
-        return u
+    def forward(self, _u: torch.Tensor) -> torch.Tensor:
+        _temp_4 = _u
+        _temp_5 = F.pad(_u, [1, 0], value=0.)[:-1]
+        _temp_3 = _temp_5 * _temp_4
+        _temp_7 = -1.0
+        _temp_8 = _u
+        _temp_9 = F.pad(_u, [0, 1], value=0.)[1:]
+        _temp_6 = _temp_9 * _temp_8 * _temp_7
+        _temp_2 = _temp_6 + _temp_3
+        return _temp_2
 
 
 class PDEFeature1(nn.Module):
     def __init__(self):
+
         super().__init__()
 
     def forward(self, u_1: torch.Tensor) -> torch.Tensor:
