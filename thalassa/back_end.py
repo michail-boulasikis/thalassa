@@ -256,23 +256,18 @@ class CodeGenAuxiliaryFeaturesPhase(BackEndPhase):
     def __call__(self):
         if self.enabled:
             code = self.backend.code
-            feat_num = 0
-            for unk, feats in self.backend.ir['features'].items():
-                for idx, (feature_name, (feature_expr, _)) in enumerate(feats):
-                    unknown_vars = list(set(map(lambda x: x.base.name, feature_expr.atoms(sympy.Indexed))))
-                    other_vars = list(filter(lambda x: x in self.backend.symbol_total_order,
-                                             feature_expr.atoms(sympy.Function, sympy.Symbol)))
-                    unknown_vars = self.backend.order_symbols_by_total_order(unknown_vars)
-                    other_vars = self.backend.order_symbols_by_total_order(other_vars)
-                    has_time = any(list(map(lambda x: x == self.backend.ir['pdes'].free_symbols[0], other_vars)))
-                    self.backend.ir['features'][unk][idx][1].append(unknown_vars)
-                    self.backend.ir['features'][unk][idx][1].append(other_vars)
-                    self.backend.ir['features'][unk][idx][1].append(has_time)
-                    feat_name = f"PDEFeature{feat_num}"
-
-                    code.emit_feature(feat_name, unknown_vars, other_vars, feature_expr, has_time=has_time)
-                    feat_num += 1
-            self.backend.feature_number = feat_num
+            for feat_base, (idx, feat_expr) in self.backend.ir['features'].items():
+                unknown_vars = list(set(map(lambda x: x.base.name, feat_expr.atoms(sympy.Indexed))))
+                other_vars = list(filter(lambda x: x in self.backend.symbol_total_order,
+                                         feat_expr.atoms(sympy.Function, sympy.Symbol)))
+                unknown_vars = self.backend.order_symbols_by_total_order(unknown_vars)
+                other_vars = self.backend.order_symbols_by_total_order(other_vars)
+                has_time = any(list(map(lambda x: x == self.backend.ir['pdes'].free_symbols[0], other_vars)))
+                self.backend.ir['features'][feat_base].append(unknown_vars)
+                self.backend.ir['features'][feat_base].append(other_vars)
+                self.backend.ir['features'][feat_base].append(has_time)
+                feat_name = f"PDEFeature{idx}"
+                code.emit_feature(feat_name, unknown_vars, other_vars, feat_expr, has_time=has_time)
 
 
 class CodeGenStencilApplicationPhase(BackEndPhase):
@@ -297,18 +292,17 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             code.emit(f"self.conv_layer = torch.nn.Conv{dims}d(")
             code.increase_indent()
             code.emit(
-                f"{self.backend.n_features}, {n_unknowns}, kernel_size={str(self.backend.stencil_slice_length)}, stride=1, padding=0")
+                f"{self.backend.n_features}, {n_unknowns}, kernel_size={str(self.backend.ir['stencil'].shape[2:])}, stride=1, padding=0")
             code.decrease_indent()
             code.emit(")")
             code.emit("self.conv_layer.weight = torch.nn.Parameter(conv_kernel, requires_grad=False)")
             code.emit(
                 f"self.conv_layer.bias = torch.nn.Parameter(torch.zeros({len(self.backend.ir['pdes'].unknowns)}, dtype={self.backend.tensor_type}), requires_grad=False)")
             # Generate code that instantiates feature layers
-            for unk, feats in self.backend.ir['features'].items():
-                for idx, (feature_name, (_, _, unknown_vars, other_vars, _)) in enumerate(feats):
-                    feat_name = f"PDEFeature{idx}"
-                    feat_args = ', '.join([f"{var.name}" for var in other_vars])
-                    code.emit(f"self.{unk.base.name}_{idx} = {feat_name}({feat_args})")
+            for idx, (k, (_, _, unknown_vars, other_vars, _)) in enumerate(self.backend.ir['features'].items()):
+                feat_name = f"PDEFeature{idx}"
+                feat_args = ', '.join([f"{var.name}" for var in other_vars])
+                code.emit(f"self.{k.name} = {feat_name}({feat_args})")
             code.decrease_indent()
             code.emit("")
             code.emit("def forward(self, ics: torch.Tensor):")
@@ -324,20 +318,18 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
                 # TODO: Other types of boundary conditions
                 code.emit(f"{unk.name} = F.pad({unk.name}, {str(paddings)}, value=0.)")
             # Step 3: Compute the features
-            for unk, feats in self.backend.ir['features'].items():
-                for idx, (_, (_, _, unknown_vars, other_vars, has_time)) in enumerate(feats):
-                    feat_name = f"{unk.base.name}_{idx}"
-                    feat_args = ', '.join([f"{str(var)}" for var in unknown_vars])
-                    feat_args = (f"{'self.time_step' if has_time else ''}{',' if feat_args and has_time else ''}"
-                                 f"{feat_args}")
-                    feat_call = f"f_{feat_name} = self.{feat_name}({feat_args})"
-                    code.emit(f"{feat_call}")
+            for idx, (k, (_, _, unknown_vars, other_vars, has_time)) in enumerate(self.backend.ir['features'].items()):
+                feat_name = f"{k.name}"
+                feat_args = ', '.join([f"{str(var)}" for var in unknown_vars])
+                feat_args = (f"{'self.time_step' if has_time else ''}{',' if feat_args and has_time else ''}"
+                             f"{feat_args}")
+                feat_call = f"f_{feat_name} = self.{feat_name}({feat_args})"
+                code.emit(f"{feat_call}")
             # Step 4: Concatenate the features and the unknowns
             code.emit("features = torch.stack([")
             code.increase_indent()
-            for unk in self.backend.ir['features'].keys():
-                for idx, _ in enumerate(self.backend.ir['features'][unk]):
-                    code.emit(f"f_{unk.base.name}_{idx},")
+            for idx, (k, _) in enumerate(self.backend.ir['features'].items()):
+                code.emit(f"f_{k.name},")
             code.decrease_indent()
             code.emit("], dim=0)")
             # Step 5: Apply the convolutional kernel
@@ -348,10 +340,9 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
 
 def _get_all_used_symbols(backend):
     set_all_symbols = []
-    for unk, feats in backend.ir['features'].items():
-        for idx, (_, (_, _, _, other_vars, _)) in enumerate(feats):
-            feat_args = list(map(lambda x: f"{x.name}: torch.Tensor", other_vars))
-            set_all_symbols.extend(feat_args)
+    for idx, (_, (_, _, _, other_vars, _)) in enumerate(backend.ir['features'].items()):
+        feat_args = list(map(lambda x: f"{x.name}: torch.Tensor", other_vars))
+        set_all_symbols.extend(feat_args)
     return set_all_symbols
 
 
@@ -374,20 +365,7 @@ class CodeGenMainNetworkPhase(BackEndPhase):
             code.emit("super().__init__()")
             for x in set_all_symbols:
                 code.emit(f"self.{x} = {x}")
-            stencil_slice_shape = list(self.backend.ir['features'].items())[0][1][0][1][1].shape
-            code.emit("self.conv_kernel = torch.zeros(")
-            code.increase_indent()
-            code.emit(f"{len(self.backend.ir['pdes'].unknowns)}, {self.backend.n_features}, "
-                      f"{', '.join(str(i) for i in stencil_slice_shape)}, dtype={self.backend.tensor_type})")
-            code.decrease_indent()
-            # Add kenrel slice coefficients to the conv_kernel tensor, for each unknown
-            for unk, feats in self.backend.ir['features'].items():
-                unk_idx = list(map(lambda x: x.name, self.backend.ir['pdes'].unknowns)).index(unk.base.name)
-                idx = 0
-                for _, (_, weights, _, _, _) in feats:
-                    code.emit(
-                        f"self.conv_kernel[{unk_idx}, {idx}, ...] = torch.tensor({np.array2string(weights, separator=',')}, dtype={self.backend.tensor_type})")
-                    idx += 1
+            code.emit(f"self.conv_kernel = torch.tensor({np.array2string(self.backend.ir['stencil'], separator=',')}, dtype={self.backend.tensor_type})")
             code.decrease_indent()
             code.emit("")
             code.emit("def forward(self, ics: torch.Tensor):")
@@ -469,8 +447,7 @@ class PytorchPDEBackEnd(object):
             *self.ir['pdes'].free_symbols
         ]
         self.symbol_total_order_str = list(map(lambda x: x.name, self.symbol_total_order))
-        self.n_features = sum([len(x) for x in self.ir['features'].values()])
-        self.stencil_slice_length = list(self.ir['features'].values())[0][0][1][1].shape
+        self.n_features = len(self.ir['features'])
         self.kwargs = kwargs
         self.phases = [
             ResolveImportsPhase(self, True, kwargs.get('output', False), kwargs.get('ics', 'external')),

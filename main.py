@@ -11,7 +11,7 @@ m1 = Function('m1')(x)
 tensor_type = np.float64
 pde = thalassa.PDESystem(
     [Eq(
-        D(u, (t, 2)) - D(u, (x, 2)), 0
+        D(u, (t, 2)) + D(u, (x, 2)), 0
     )],
     [u],
     [t, x]
@@ -32,7 +32,7 @@ np.save('u_burgers.npy', u_initial)
 
 with open('burgers.py', 'w') as output_file:
     code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', output='plot',
-                                sol_hypercube=[100, int(1 / dx)], dt=dt,
+                                sol_hypercube=[1000, int(1 / dx)], dt=dt,
                                 funcs={})
     output_file.write(code)
 

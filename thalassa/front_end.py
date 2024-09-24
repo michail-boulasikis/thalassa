@@ -265,91 +265,81 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
         if not self.enabled:
             return
         if self.frontend.solved_pdes:
-            for unk, expr in self.frontend.solved_pdes.items():
-                # We expand the expression and get all terms. Then we factor out the constants from each term
-                # and sort the terms first by the number of indexed variables in each term and
-                # then by the absolute value of the sum of the indices in the indexed variables
-                # This is done to bring more "general" terms closer to the front,
-                # as well as terms which are more "centered".
-                expr_terms = sympy.Add.make_args(expr.expand())
-                consts = [functools.reduce(lambda x, y: x * y,
-                                           [c for c in t.as_ordered_factors() if
-                                            c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
-                          for t in expr_terms]
-                pure_terms = [(c, sympy.nsimplify(t / c)) for t, c in zip(expr_terms, consts)]
-                pure_terms_idxd = [(c, t, len(list(t.atoms(sympy.Indexed))), abs(sum(sum(x for x in i.indices[1:]) for i in list(t.atoms(sympy.Indexed)))))
-                                   for c, t in pure_terms]
-                pure_terms = [(c, t) for c, t, _, _ in sorted(pure_terms_idxd, key=lambda x: (x[2], x[3]))]
-                # We form a 2D array of matches between the terms. If two terms are equal up to a shift in the indices,
-                # we store the shift. If a term is not equal to any other term, we store None.
-                # The search space for the shifts is determined by the minimum and maximum indices
-                # of the indexed variables in the term as well as the limits of the discretization.
-                # This step is expected to be the most computationally expensive step, especially if the number of terms
-                # is large.
-                matches = [None] * len(pure_terms) * len(pure_terms)
-                imin, imax = _find_iminmax(self.frontend.discretizations)
-                imin = imin[1:]
-                imax = imax[1:]
-                for i in range(len(pure_terms)):
-                    for j in range(len(pure_terms)):
-                        if matches[i * len(pure_terms) + j] is not None:
-                            continue
-                        hypercube_range_min, hypercube_range_max = _get_hypercube_range(pure_terms[i][1], imin, imax)
-                        search_range = [r + 1 for r in hypercube_range_max - hypercube_range_min]
-                        for nidx in np.ndindex(*search_range):
-                            shft = nidx + hypercube_range_min
-                            t_idxd = list(pure_terms[i][1].atoms(sympy.Indexed))
-                            substitutions = {}
-                            for idxd in t_idxd:
-                                new_idxd = sympy.Indexed(idxd.base, *(
-                                        [idxd.indices[0]] + [i + j for i, j in zip(idxd.indices[1:], shft)]))
-                                substitutions[idxd] = new_idxd
-                            new_expr = pure_terms[i][1].subs(substitutions)
-                            diff = sympy.simplify(new_expr - pure_terms[j][1])
-                            if diff == 0:
-                                matches[i * len(pure_terms) + j] = shft
-                                matches[j * len(pure_terms) + i] = -shft
-                                break
-                # Turning the matches into a 2D array
-                matches = [matches[i:i + len(pure_terms)] for i in range(0, len(matches), len(pure_terms))]
-                # TODO: holy shit I have to fix this mess
-                first_not_none = [next((i for i, m in enumerate(match) if m is not None), None) for match in matches]
-                feature_dict = {}
-                prev_idx = -1
-                feature_idx = -1
-                current_feature = None
-                for i, m in enumerate(first_not_none):
-                    if prev_idx != m:
-                        feature_idx += 1
-                        current_feature = sympy.Indexed(f"F_{feature_idx}", *([0] * (len(imin) + 1)))
-                        feature_dict[current_feature] = [pure_terms[i][1], pure_terms[m][0] * current_feature,
-                                                         pure_terms[i][0] * pure_terms[i][1]]
-                        prev_idx = m
-                    else:
-                        current_feature_with_offset = sympy.Indexed(
-                            f"F_{feature_idx}",*[current_feature.indices[0]] +
-                                      [x + y for x, y in zip(current_feature.indices[1:], matches[m][i])])
-                        feature_dict[current_feature][1] += pure_terms[i][0] * current_feature_with_offset
-                        feature_dict[current_feature][2] += pure_terms[i][1] * pure_terms[i][0]
-                feature_dict = [[k, v] for k, v in feature_dict.items()]
-                feature_dict = [[k, v] for k, v in sorted(
-                    feature_dict, key=lambda x: len(sympy.Add.make_args(x[1][1])), reverse=True)]
-                # Finally, we summarize the tailing features into a single feature, if the number of features exceeds
-                # the maximum number of features
-                if len(feature_dict) > self.max_features:
-                    remaining_features = feature_dict[self.max_features-1:]
-                    feature_dict = feature_dict[:self.max_features-1]
-                    summarizing_feature = sympy.Indexed(f"F_{self.max_features}", *([0] * (len(imin) + 1)))
-                    summarizing_feature_entry = [summarizing_feature, [sympy.Number(0),
-                                                                       summarizing_feature, sympy.Number(0)]]
-                    while remaining_features:
-                        fn, (f_expr, _, f_expr_all) = remaining_features.pop(0)
-                        summarizing_feature_entry[1][0] += f_expr_all
-                        summarizing_feature_entry[1][2] += f_expr_all
-                        # remove the feature from the remaining features
-                        remaining_features = [(k, v) for k, v in remaining_features if k != fn]
-                    feature_dict.append(summarizing_feature_entry)
-                self.frontend.ir[unk] = feature_dict
+            # We expand the expressions and get all terms. Then we factor out the constants from each term
+            # and sort the terms first by the number of indexed variables in each term and
+            # then by the absolute value of the sum of the indices in the indexed variables
+            # and finally by the number of atoms in the term.
+            # This is done to bring more "general" terms closer to the front,
+            # as well as terms which are more "centered".
+            unk_eq_terms = [x for k, v in self.frontend.solved_pdes.items() for x in sympy.Add.make_args(v.expand())]
+            consts = [functools.reduce(lambda x, y: x * y,
+                                       [c for c in t.as_ordered_factors() if c.is_constant()
+                                        and not isinstance(c, sympy.Indexed)
+                                        and not isinstance(c, sympy.Pow)] or [1.0])
+                      for t in unk_eq_terms]
+            pure_terms = [(c, sympy.nsimplify(t / c)) for t, c in zip(unk_eq_terms, consts)]
+            pure_terms_idxd = [(c, t,
+                                len(list(t.atoms(sympy.Indexed))),
+                                abs(sum(sum(x for x in i.indices[1:]) for i in list(t.atoms(sympy.Indexed)))),
+                                sum(1 for _ in t.atoms()),
+                                max(len(x.base.name) for x in t.atoms(sympy.Indexed))) for c, t in pure_terms]
+            pure_terms = [(c, t) for c, t, *_ in sorted(pure_terms_idxd, key=lambda x: (x[2], x[3], x[4], x[5]))]
+            # We form a 2D array of matches between the terms. If two terms are equal up to a shift in the indices,
+            # we store the shift. If a term is not equal to any other term, we store None.
+            # The search space for the shifts is determined by the minimum and maximum indices
+            # of the indexed variables in the term as well as the limits of the discretization.
+            # This step is expected to be the most computationally expensive step, especially if the number of terms
+            # is large.
+            matches = [None] * len(pure_terms) * len(pure_terms)
+            imin, imax = _find_iminmax(self.frontend.discretizations)
+            imin = imin[1:]
+            imax = imax[1:]
+            for i in range(len(pure_terms)):
+                for j in range(len(pure_terms)):
+                    if matches[i * len(pure_terms) + j] is not None:
+                        continue
+                    hypercube_range_min, hypercube_range_max = _get_hypercube_range(pure_terms[i][1], imin, imax)
+                    search_range = [r + 1 for r in hypercube_range_max - hypercube_range_min]
+                    for nidx in np.ndindex(*search_range):
+                        shft = nidx + hypercube_range_min
+                        t_idxd = list(pure_terms[i][1].atoms(sympy.Indexed))
+                        substitutions = {}
+                        for idxd in t_idxd:
+                            new_idxd = sympy.Indexed(idxd.base, *(
+                                    [idxd.indices[0]] + [i + j for i, j in zip(idxd.indices[1:], shft)]))
+                            substitutions[idxd] = new_idxd
+                        new_expr = pure_terms[i][1].subs(substitutions)
+                        diff = sympy.simplify(new_expr - pure_terms[j][1])
+                        if diff == 0:
+                            matches[i * len(pure_terms) + j] = shft
+                            matches[j * len(pure_terms) + i] = -shft
+                            break
+            # Turning the matches into a 2D array
+            matches = [matches[i:i + len(pure_terms)] for i in range(0, len(matches), len(pure_terms))]
+            # We now create the features. We start by creating a dictionary of features for each unknown.
+            # We then iterate over the terms and match them with other terms. If a term is not matched with any
+            # other term, we create a feature for it and loop over the array of terms to match it.
+            # If a term is matched with other terms, we continue.
+            feature_list = []
+            subs_dict = {}
+            expr_match_pairs = list(zip(pure_terms, matches))
+            matched = [False] * len(pure_terms)
+            feature_counter = 0
+            while not all(matched):
+                new_feature_expr, new_feature_matches = expr_match_pairs.pop(0)
+                feature_base = sympy.IndexedBase(f"__FEATURE_{feature_counter}")
+                feature_idx = ([0] * (len(imin) + 1))
+                if not matched[pure_terms.index(new_feature_expr)]:
+                    feature_list.append({feature_base: new_feature_expr[1]})
+                    for j, offset in enumerate(new_feature_matches):
+                        if offset is not None and not matched[j]:
+                            subs_dict[pure_terms[j][1]] = feature_base[[0] + offset.tolist()]
+                            matched[j] = True
+                    feature_counter += 1
+            self.frontend.ir = {
+                'features': {k: [i, v] for i, d in enumerate(feature_list) for k, v in d.items()},
+                'eqs': {k: v.subs(subs_dict, simultaneous=True) for k, v in self.frontend.solved_pdes.items()},
+            }
 
 
 def _find_iminmax(disc):
@@ -374,21 +364,20 @@ class ComputeStencilCoefficients(FrontEndPhase):
             imin, imax = _find_iminmax(self.frontend.discretizations)
             kernel_slice_shape = [imax[i] - imin[i] + 1 for i in range(len(imin))]
             kernel_slice_shape = kernel_slice_shape[1:]
-            for k, v in self.frontend.ir.items():
-                for i, (f, (_, f_conv, _)) in enumerate(v):
-                    stencil_slice_const = np.zeros(kernel_slice_shape)
-                    for term in sympy.Add.make_args(f_conv):
-                        coeff = functools.reduce(lambda x, y: x * y,
-                                                 [c for c in term.as_ordered_factors() if
-                                                  c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
-                        idxd_list = list(term.atoms(sympy.Indexed))
-                        if not idxd_list:
-                            stencil_slice_const[(imax - imin) // 2] += coeff
-                        else:
-                            index = [int(i) for i in idxd_list.pop().indices[1:]]
-                            stencil_slice_const[tuple([i - j for i, j in zip(index, imin[1:])])] += coeff
-                    self.frontend.ir[k][i][1][1] = stencil_slice_const
-                    del self.frontend.ir[k][i][1][2]
+            n_total_features = len(self.frontend.ir['features'])
+            n_unknowns = len(self.frontend.pde_system.unknowns)
+            stencil = np.zeros(shape=(n_unknowns, n_total_features, *kernel_slice_shape), dtype=np.float64)
+            for unk_idx, (unk, expr) in enumerate(self.frontend.ir['eqs'].items()):
+                for t in sympy.Add.make_args(expr.expand()):
+                    multiplicative_constant = functools.reduce(lambda x, y: x * y,
+                                                               [c for c in t.as_ordered_factors() if
+                                                                c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
+                    feature = t.atoms(sympy.Indexed).pop()
+                    feature_number = self.frontend.ir['features'][feature.base][0]
+                    feature_idx = (unk_idx, feature_number) + tuple([i - j for i, j in zip(feature.indices[1:], imin[1:])])
+                    stencil[feature_idx] += multiplicative_constant
+            self.frontend.ir['stencil'] = stencil
+            del self.frontend.ir['eqs']
 
 
 class PrepareIRPhase(FrontEndPhase):
@@ -403,7 +392,8 @@ class PrepareIRPhase(FrontEndPhase):
         if self.frontend.ir:
             self.frontend.ir = {
                 'pdes': self.frontend.pde_system,
-                'features': self.frontend.ir
+                'features': self.frontend.ir['features'],
+                'stencil': self.frontend.ir['stencil']
             }
 
 
@@ -429,6 +419,7 @@ class PDEFrontEnd(object):
             DiscretizePDESystemPhase(self, True),
             SolveForNextTimestepPhase(self, True),
             CreateAuxiliaryFeaturesPhase(self, True, kwargs.get('max_features', 3)),
+            # CrossUnknownFeatureOptimizationPhase(self, True) (for the future?)
             ComputeStencilCoefficients(self, True),
             PrepareIRPhase(self, True)
         ]
