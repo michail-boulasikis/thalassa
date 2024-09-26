@@ -23,7 +23,8 @@ class PDESystem(object):
             raise ValueError("Free symbols (i.e., variables) must be sympy symbols (e.g., t, x, y)")
         self.unknowns = unknowns
         self.free_symbols = free_symbols
-        self.free_functions = [f for eq in equations for f in eq.atoms(sympy.Function) if f not in unknowns]
+        self.free_functions = [f for eq in equations for f in eq.atoms(sympy.Function) if
+                               (f not in unknowns and isinstance(f.__class__, sympy.core.function.UndefinedFunction))]
 
     def __str__(self):
         return f"PDESystem({self.equations})"
@@ -114,7 +115,6 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
             max_order.items()]
         new_vars = {e[0]: e for e in new_vars}
         # If we have only first order derivatives, return as is
-
         if not new_vars:
             return
         new_eqs = [sympy.Eq(sympy.Derivative(nv[idx - 1], self.frontend.pde_system.free_symbols[0]), var) for _, nv in
@@ -252,6 +252,57 @@ def _get_hypercube_range(term1, global_imin, global_imax):
     return global_imin - imin_vars, global_imax - imax_vars
 
 
+def _center_term(term):
+    _, t = term
+    idxd = list(t.atoms(sympy.Indexed))
+    if not idxd:
+        return term
+    # Group by base
+    idxd_dict = {}
+    for i in idxd:
+        if i.base not in idxd_dict:
+            idxd_dict[i.base] = []
+        idxd_dict[i.base].append(i)
+    # If there is any base with indices all equal to 0, return the term as is
+    if any(all(ii == 0 for ii in i.indices[1:]) for i in idxd):
+        return term
+    # If for any of the bases, for every indexed variable with index i there is an indexed variable with index -i
+    # that means the term is centered, so return the term as is
+    for _, v in idxd_dict.items():
+        if all(any(all(ii == -jj for ii, jj in zip(i.indices[1:], j.indices[1:])) for j in v) for i in v):
+            return term
+    # If the term is not centered, we center it
+    # We find the index with the smallest manhattan distance from the origin
+    # and shift all indices of that variable by that amount
+    min_dist = 100
+    min_idxd = None
+    for i in idxd:
+        dist = sum(abs(j) for j in i.indices[1:])
+        if dist < min_dist:
+            min_dist = dist
+            min_idxd = i
+    substitutions = {}
+    for i in idxd:
+        new_idxd = sympy.Indexed(i.base, *([i.indices[0]] + [j - k for j, k in zip(i.indices[1:], min_idxd.indices[1:])]))
+        substitutions[i] = new_idxd
+    return term[0], term[1].subs(substitutions)
+
+
+def _delete_duplicates(terms):
+    while True:
+        deletion = False
+        for i in range(len(terms)):
+            for j in range(i + 1, len(terms)):
+                if sympy.simplify(terms[i][1] - terms[j][1]) == 0:
+                    terms.pop(j)
+                    deletion = True
+                    break
+            if deletion:
+                break
+        if not deletion:
+            break
+    return terms
+
 class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
     def __init__(self, frontend, enabled=True, max_features=4):
         super().__init__("create_auxiliary_features",
@@ -271,76 +322,60 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
             # and finally by the number of atoms in the term.
             # This is done to bring more "general" terms closer to the front,
             # as well as terms which are more "centered".
-            unk_eq_terms = [x for k, v in self.frontend.solved_pdes.items() for x in sympy.Add.make_args(v.expand())]
-            consts = [functools.reduce(lambda x, y: x * y,
-                                       [c for c in t.as_ordered_factors() if c.is_constant()
-                                        and not isinstance(c, sympy.Indexed)
-                                        and not isinstance(c, sympy.Pow)] or [1.0])
-                      for t in unk_eq_terms]
-            pure_terms = [(c, sympy.nsimplify(t / c)) for t, c in zip(unk_eq_terms, consts)]
-            pure_terms_idxd = [(c, t,
-                                len(list(t.atoms(sympy.Indexed))),
-                                abs(sum(sum(x for x in i.indices[1:]) for i in list(t.atoms(sympy.Indexed)))),
-                                sum(1 for _ in t.atoms()),
-                                max(len(x.base.name) for x in t.atoms(sympy.Indexed))) for c, t in pure_terms]
-            pure_terms = [(c, t) for c, t, *_ in sorted(pure_terms_idxd, key=lambda x: (x[2], x[3], x[4], x[5]))]
+            unk_eq_terms = [x.as_coeff_Mul() for k, v in self.frontend.solved_pdes.items() for x in sympy.Add.make_args(v.expand())]
+            pure_terms_centered = [_center_term(t) for t in unk_eq_terms]
+            pure_terms_centered = _delete_duplicates(pure_terms_centered)
+            pure_terms_idxd = [(c, t, len(list(t.atoms(sympy.Indexed)))) for c, t in pure_terms_centered]
+            pure_terms_centered = [(c, t) for c, t, *_ in sorted(pure_terms_idxd, key=lambda x: x[2])]
             # We form a 2D array of matches between the terms. If two terms are equal up to a shift in the indices,
             # we store the shift. If a term is not equal to any other term, we store None.
             # The search space for the shifts is determined by the minimum and maximum indices
             # of the indexed variables in the term as well as the limits of the discretization.
             # This step is expected to be the most computationally expensive step, especially if the number of terms
             # is large.
-            matches = [None] * len(pure_terms) * len(pure_terms)
+            matches = [None] * len(unk_eq_terms) * len(pure_terms_centered)
             imin, imax = _find_iminmax(self.frontend.discretizations)
             imin = imin[1:]
             imax = imax[1:]
-            for i in range(len(pure_terms)):
-                for j in range(len(pure_terms)):
-                    if matches[i * len(pure_terms) + j] is not None:
-                        continue
-                    hypercube_range_min, hypercube_range_max = _get_hypercube_range(pure_terms[i][1], imin, imax)
+            for i in range(len(unk_eq_terms)):
+                for j in range(len(pure_terms_centered)):
+                    hypercube_range_min, hypercube_range_max = _get_hypercube_range(unk_eq_terms[i][1], imin, imax)
                     search_range = [r + 1 for r in hypercube_range_max - hypercube_range_min]
                     for nidx in np.ndindex(*search_range):
                         shft = nidx + hypercube_range_min
-                        t_idxd = list(pure_terms[i][1].atoms(sympy.Indexed))
+                        t_idxd = list(unk_eq_terms[i][1].atoms(sympy.Indexed))
                         substitutions = {}
                         for idxd in t_idxd:
                             new_idxd = sympy.Indexed(idxd.base, *(
                                     [idxd.indices[0]] + [i + j for i, j in zip(idxd.indices[1:], shft)]))
                             substitutions[idxd] = new_idxd
-                        new_expr = pure_terms[i][1].subs(substitutions)
-                        diff = sympy.simplify(new_expr - pure_terms[j][1])
+                        new_expr = unk_eq_terms[i][1].subs(substitutions, simultaneous=True)
+                        diff = sympy.simplify(new_expr - pure_terms_centered[j][1])
                         if diff == 0:
-                            matches[i * len(pure_terms) + j] = shft
-                            matches[j * len(pure_terms) + i] = -shft
+                            matches[i * len(pure_terms_centered) + j] = shft
                             break
             # Turning the matches into a 2D array
-            matches = [matches[i:i + len(pure_terms)] for i in range(0, len(matches), len(pure_terms))]
+            matches = [matches[i:i + len(pure_terms_centered)] for i in range(0, len(matches), len(pure_terms_centered))]
+            matches = [next(item for item in enumerate(m) if item[1] is not None) for m in matches]
+            matches = [(pure_terms_centered[i], j) for i, j in matches]
             # We now create the features. We start by creating a dictionary of features for each unknown.
             # We then iterate over the terms and match them with other terms. If a term is not matched with any
             # other term, we create a feature for it and loop over the array of terms to match it.
             # If a term is matched with other terms, we continue.
-            feature_list = []
+            feature_list = list({f for (_, f), _ in matches})
             subs_dict = {}
-            expr_match_pairs = list(zip(pure_terms, matches))
-            matched = [False] * len(pure_terms)
-            feature_counter = 0
-            while not all(matched):
-                new_feature_expr, new_feature_matches = expr_match_pairs.pop(0)
-                feature_base = sympy.IndexedBase(f"__FEATURE_{feature_counter}")
-                feature_idx = ([0] * (len(imin) + 1))
-                if not matched[pure_terms.index(new_feature_expr)]:
-                    feature_list.append({feature_base: new_feature_expr[1]})
-                    for j, offset in enumerate(new_feature_matches):
-                        if offset is not None and not matched[j]:
-                            subs_dict[pure_terms[j][1]] = feature_base[[0] + offset.tolist()]
-                            matched[j] = True
-                    feature_counter += 1
+            expr_match_pairs = list(zip(list(range(len(unk_eq_terms))), unk_eq_terms, matches))
+            for j, (coeff_term, term_expr), ((pure_coeff, pure_term), offset) in expr_match_pairs:
+                feature_base = sympy.IndexedBase(f"__FEATURE_{feature_list.index(pure_term)}")
+                subs_dict[term_expr] = feature_base[[0] + offset.tolist()]
+            # Needed, otherwise substitution will not work
+            # for k, v in self.frontend.solved_pdes.items():
+            #     self.frontend.solved_pdes[k] = sympy.nsimplify(v)
+            # We substitute the features in the solved PDEs
             self.frontend.ir = {
-                'features': {k: [i, v] for i, d in enumerate(feature_list) for k, v in d.items()},
+                'features': {sympy.IndexedBase(f"__FEATURE_{i}"): [i, v] for i, v in enumerate(feature_list)},
                 'eqs': {k: v.subs(subs_dict, simultaneous=True) for k, v in self.frontend.solved_pdes.items()},
             }
-
 
 def _find_iminmax(disc):
     imin = np.zeros(len(disc[0].order), dtype=int) + 100
@@ -369,12 +404,11 @@ class ComputeStencilCoefficients(FrontEndPhase):
             stencil = np.zeros(shape=(n_unknowns, n_total_features, *kernel_slice_shape), dtype=np.float64)
             for unk_idx, (unk, expr) in enumerate(self.frontend.ir['eqs'].items()):
                 for t in sympy.Add.make_args(expr.expand()):
-                    multiplicative_constant = functools.reduce(lambda x, y: x * y,
-                                                               [c for c in t.as_ordered_factors() if
-                                                                c.is_constant() and not isinstance(c, sympy.Indexed)] or [1.0])
+                    multiplicative_constant = t.as_coeff_Mul()[0] if len(t.as_coeff_Mul()) > 1 else 1
                     feature = t.atoms(sympy.Indexed).pop()
                     feature_number = self.frontend.ir['features'][feature.base][0]
-                    feature_idx = (unk_idx, feature_number) + tuple([i - j for i, j in zip(feature.indices[1:], imin[1:])])
+                    feature_idx = (unk_idx, feature_number) + tuple(
+                        [i - j for i, j in zip(feature.indices[1:], imin[1:])])
                     stencil[feature_idx] += multiplicative_constant
             self.frontend.ir['stencil'] = stencil
             del self.frontend.ir['eqs']

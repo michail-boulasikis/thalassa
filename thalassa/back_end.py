@@ -51,6 +51,7 @@ def _resolve_func_name(func):
 class CodeEmitter(object):
     def __init__(self):
         self.code = ""
+        self.ir = {}
         self.indent = 0
         self.symbol_stack = []
         self.symbol_id = 0
@@ -89,7 +90,7 @@ class CodeEmitter(object):
             self.emit(f"{res_name} = {name}({', '.join(args)})")
         else:
             res_name = self.make_temp()
-            self.emit(f"{res_name} = {func.name}{'[time_step]' if len(func.args) > 0 else ''}")
+            self.emit(f"{res_name} = {func.name}{'[time_step]' if self.ir['pdes'].free_symbols[0] in func.args else ''}")
 
     @dispatch(sympy.Pow)
     def emit(self, tree):
@@ -338,12 +339,12 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             code.emit("")
 
 
-def _get_all_used_symbols(backend):
+def _get_all_used_symbols(backend, tt=True):
     set_all_symbols = []
     for idx, (_, (_, _, _, other_vars, _)) in enumerate(backend.ir['features'].items()):
-        feat_args = list(map(lambda x: f"{x.name}: torch.Tensor", other_vars))
+        feat_args = list(map(lambda x: f"{x.name}{': torch.Tensor' if tt else ''}", other_vars))
         set_all_symbols.extend(feat_args)
-    return set_all_symbols
+    return list(set(set_all_symbols))
 
 
 class CodeGenMainNetworkPhase(BackEndPhase):
@@ -358,28 +359,29 @@ class CodeGenMainNetworkPhase(BackEndPhase):
             code = self.backend.code
             code.emit("class PDENetwork(torch.nn.Module):")
             code.increase_indent()
-            set_all_symbols = _get_all_used_symbols(self.backend)
-            set_all_synbols_args = ', '.join(f'{x}: torch.Tensor' for x in set_all_symbols)
-            code.emit(f"def __init__(self, {set_all_synbols_args}):")
+            set_all_symbols = _get_all_used_symbols(self.backend, tt=False)
+            set_all_symbols_args = ', '.join(f'{x}' for x in _get_all_used_symbols(self.backend))
+            code.emit(f"def __init__(self, {set_all_symbols_args}):")
             code.increase_indent()
             code.emit("super().__init__()")
             for x in set_all_symbols:
                 code.emit(f"self.{x} = {x}")
+            code.emit(f"self.time_steps = {self.time_steps}")
             code.emit(f"self.conv_kernel = torch.tensor({np.array2string(self.backend.ir['stencil'], separator=',')}, dtype={self.backend.tensor_type})")
             code.decrease_indent()
             code.emit("")
-            code.emit("def forward(self, ics: torch.Tensor):")
+            code.emit("def forward(self, ics: torch.Tensor, i: int):")
             code.increase_indent()
             for i in range(self.time_steps):
                 code.emit(
-                    f"ics = PDEISL({i}, self.conv_kernel, {', '.join(f'self.{x}' for x in set_all_symbols)})(ics)")
+                    f"ics = PDEISL(self.time_steps * i + {i}, self.conv_kernel, {', '.join(f'self.{x}' for x in set_all_symbols)})(ics)")
             code.emit("return ics")
             code.reset_indent()
             code.emit("")
 
 
 class CodeGenMainFunctionPhase(BackEndPhase):
-    def __init__(self, backend, enabled=True, ics='external', outcome='external', hypercube=None):
+    def __init__(self, backend, enabled=True, ics='external', outcome='external', hypercube=None, loop_iterations=20):
         super().__init__("codegen_main_function",
                          "Generates the code that executes when the generated script is run (the main function).",
                          backend,
@@ -387,6 +389,7 @@ class CodeGenMainFunctionPhase(BackEndPhase):
         self.outcome = outcome if outcome is not None else 'external'
         self.ics = ics if ics is not None else 'external'
         self.hypercube = hypercube if hypercube is not None else [100] * len(self.backend.ir['pdes'].free_symbols)
+        self.loop_iterations = loop_iterations
 
     def __call__(self):
         if self.enabled:
@@ -395,7 +398,7 @@ class CodeGenMainFunctionPhase(BackEndPhase):
             code.emit("if __name__ == '__main__':")
             code.increase_indent()
             for i, (sym, dim) in enumerate(zip(self.backend.ir['pdes'].free_symbols, self.hypercube)):
-                code.emit(f"{sym.name} = torch.linspace(0, 1, {dim}, dtype={self.backend.tensor_type})")
+                code.emit(f"{sym.name} = torch.linspace(0, 1, {dim * (self.loop_iterations if i == 0 else 1)}, dtype={self.backend.tensor_type})")
             i = 1
             if self.ics == 'external':
                 for sym in self.backend.ir['pdes'].unknowns:
@@ -409,9 +412,12 @@ class CodeGenMainFunctionPhase(BackEndPhase):
                         i += 1
             ics = ', '.join([f"{x.name}" for x in self.backend.ir['pdes'].unknowns])
             code.emit(f"initial_conditions = torch.stack([{ics}])")
-            set_all_symbols = _get_all_used_symbols(self.backend)
+            set_all_symbols = _get_all_used_symbols(self.backend, tt=False)
             code.emit(f"network = PDENetwork({', '.join(set_all_symbols)})")
-            code.emit("initial_conditions = network(initial_conditions)")
+            code.emit(f"for i in range({self.loop_iterations}):")
+            code.increase_indent()
+            code.emit("initial_conditions = network(initial_conditions, i)")
+            code.decrease_indent()
             match self.outcome:
                 case 'external':
                     code.emit(f"np.save(sys.argv[{i}], initial_conditions.detach().numpy())")
@@ -441,6 +447,7 @@ class PytorchPDEBackEnd(object):
         self.stencil = None
         self.tensor_type = _get_acc(kwargs.get('num_acc', 'f64'))
         self.code = CodeEmitter()
+        self.code.ir = self.ir
         self.symbol_total_order = [
             *self.ir['pdes'].unknowns,
             *self.ir['pdes'].free_functions,
@@ -453,9 +460,9 @@ class PytorchPDEBackEnd(object):
             ResolveImportsPhase(self, True, kwargs.get('output', False), kwargs.get('ics', 'external')),
             CodeGenAuxiliaryFeaturesPhase(self, True),
             CodeGenStencilApplicationPhase(self, True),
-            CodeGenMainNetworkPhase(self, True, kwargs.get('sol_hypercube', [100])[0]),
+            CodeGenMainNetworkPhase(self, True, kwargs.get('sol_hypercube', [20])[0]),
             CodeGenMainFunctionPhase(self, True, kwargs.get('ics', 'external'), kwargs.get('output', 'external'),
-                                     kwargs.get('sol_hypercube', None))
+                                     kwargs.get('sol_hypercube', None), kwargs.get('loop_iterations', 20))
         ]
 
     def execute(self):

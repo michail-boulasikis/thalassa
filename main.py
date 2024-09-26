@@ -7,33 +7,34 @@ import thalassa
 t, x = symbols('t x')
 u = Function('u')(t, x)
 m1 = Function('m1')(x)
-#g = Function('g')(t, x)
+# g = Function('g')(t, x)
 tensor_type = np.float64
 pde = thalassa.PDESystem(
     [Eq(
-        D(u, (t, 2)) + D(u, (x, 2)), 0
+        D(u, t) - u * D(u, (x, 2)), sympy.exp(u)
     )],
     [u],
     [t, x]
 )
 
 disc = [
-    thalassa.fdm_simple_partial_derivative(D(u, (x, 2)), dx := 0.02, method='central')
+    thalassa.fdm_simple_partial_derivative(D(u, (x, 1)), dx := 0.05, method='central'),
+    thalassa.fdm_simple_partial_derivative(D(u, (x, 2)), dx := 0.05, method='central')
 ]
 dt = 0.0001
 xs = np.linspace(0, 1, int(1 / dx), dtype=tensor_type)
-#ts = np.linspace(0, 1, int(1 / dt), dtype=tensor_type)
-u_initial = np.exp(-80 * (xs - 0.5)**2)
-#Ts, Xs = np.meshgrid(ts, xs, indexing='ij')
-#g_forcing = np.pad(0.01 * np.sin(2 * np.pi * Xs) * np.exp(-200*Ts), [(1, 1), (1, 1)], mode='constant', constant_values=0.)
+# ts = np.linspace(0, 1, int(1 / dt), dtype=tensor_type)
+u_initial = np.exp(-100 * (xs - 0.5) ** 2)
+# Ts, Xs = np.meshgrid(ts, xs, indexing='ij')
+# g_forcing = np.pad(0.01 * np.sin(2 * np.pi * Xs) * np.exp(-200*Ts), [(1, 1), (1, 1)], mode='constant', constant_values=0.)
 
 np.save('u_burgers.npy', u_initial)
-#np.save('g_burgers.npy', g_forcing)
+# np.save('g_burgers.npy', g_forcing)
 
 with open('burgers.py', 'w') as output_file:
     code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', output='plot',
-                                sol_hypercube=[1000, int(1 / dx)], dt=dt,
-                                funcs={})
+                                sol_hypercube=[4, int(1 / dx)], dt=dt,
+                                funcs={m1: 'external'}, loop_iterations=60)
     output_file.write(code)
 
 """
