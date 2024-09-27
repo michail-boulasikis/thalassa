@@ -303,6 +303,7 @@ def _delete_duplicates(terms):
             break
     return terms
 
+
 class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
     def __init__(self, frontend, enabled=True, max_features=4):
         super().__init__("create_auxiliary_features",
@@ -453,7 +454,6 @@ class PDEFrontEnd(object):
             DiscretizePDESystemPhase(self, True),
             SolveForNextTimestepPhase(self, True),
             CreateAuxiliaryFeaturesPhase(self, True, kwargs.get('max_features', 3)),
-            # CrossUnknownFeatureOptimizationPhase(self, True) (for the future?)
             ComputeStencilCoefficients(self, True),
             PrepareIRPhase(self, True)
         ]
