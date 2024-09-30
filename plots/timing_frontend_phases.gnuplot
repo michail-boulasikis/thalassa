@@ -1,5 +1,5 @@
 set terminal svg size 1200,300
-set output 'timing_frontend_phases.svg'
+set output 'plots/timing_frontend_phases.svg'
 
 set datafile separator ','
 
