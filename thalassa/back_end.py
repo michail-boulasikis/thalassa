@@ -1,4 +1,3 @@
-import functools
 import pprint
 from abc import ABC, abstractmethod
 from multipledispatch import dispatch
@@ -6,6 +5,7 @@ import numpy as np
 import sympy
 import itertools
 import thalassa
+import time
 
 
 def _resolve_func_name(func):
@@ -297,8 +297,12 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             code.decrease_indent()
             code.emit(")")
             code.emit("self.conv_layer.weight = torch.nn.Parameter(conv_kernel, requires_grad=False)")
+            biases = [(k, v) for k, v in self.backend.ir['biases'].items()]
+            # Sort biases by the total order of symbols
+            biases = sorted(biases, key=lambda x: self.backend.symbol_total_order_str.index(x[0].base.name))
+            biases = list(map(lambda x: x[1], biases))
             code.emit(
-                f"self.conv_layer.bias = torch.nn.Parameter(torch.zeros({len(self.backend.ir['pdes'].unknowns)}, dtype={self.backend.tensor_type}), requires_grad=False)")
+                f"self.conv_layer.bias = torch.nn.Parameter(torch.tensor({str(biases)}, dtype={self.backend.tensor_type}), requires_grad=False)")
             # Generate code that instantiates feature layers
             for idx, (k, (_, _, unknown_vars, other_vars, _)) in enumerate(self.backend.ir['features'].items()):
                 feat_name = f"PDEFeature{idx}"
@@ -466,7 +470,16 @@ class PytorchPDEBackEnd(object):
         ]
 
     def execute(self):
-        [phase() for phase in self.phases]
+        timing = {}
+        for phase in self.phases:
+            t_start = time.time()
+            phase()
+            t_end = time.time()
+            timing[phase.name] = t_end - t_start
+        timing['total'] = sum(timing.values())
+        if self.kwargs.get('timeit', False):
+            import pandas as pd
+            pd.DataFrame(timing, index=[0]).to_csv("generated-data/" + self.ir['pdes'].name + '.timing.backend.csv')
         return f"{self.code}"
 
     def order_symbols_by_total_order(self, symbols):

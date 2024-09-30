@@ -1,6 +1,7 @@
 import functools
 import pprint
 
+import time
 import sympy
 import itertools
 import copy
@@ -11,7 +12,7 @@ from abc import ABC, abstractmethod
 
 
 class PDESystem(object):
-    def __init__(self, equations, unknowns, free_symbols):
+    def __init__(self, equations, unknowns, free_symbols, name=None):
         if not equations or not unknowns or not free_symbols:
             raise ValueError("Equations, unknowns, and free symbols must be provided")
         if not all(isinstance(eq, sympy.Eq) for eq in equations):
@@ -25,6 +26,10 @@ class PDESystem(object):
         self.free_symbols = free_symbols
         self.free_functions = [f for eq in equations for f in eq.atoms(sympy.Function) if
                                (f not in unknowns and isinstance(f.__class__, sympy.core.function.UndefinedFunction))]
+        if name is None:
+            self.name = "PDESystem"
+        else:
+            self.name = name
 
     def __str__(self):
         return f"PDESystem({self.equations})"
@@ -57,7 +62,11 @@ class SimplifyDerivativesPhase(FrontEndPhase):
 
     def __call__(self):
         if self.enabled:
-            self.frontend.pde_system.equations = [eq.simplify() for eq in self.frontend.pde_system.equations]
+            for i, eq in enumerate(self.frontend.pde_system.equations):
+                subs_dict = {}
+                for d in eq.atoms(sympy.Derivative):
+                    subs_dict[d] = d.doit()
+                self.frontend.pde_system.equations[i] = eq.subs(subs_dict)
 
 
 class SubstituteFreeFunctionsPhase(FrontEndPhase):
@@ -283,7 +292,8 @@ def _center_term(term):
             min_idxd = i
     substitutions = {}
     for i in idxd:
-        new_idxd = sympy.Indexed(i.base, *([i.indices[0]] + [j - k for j, k in zip(i.indices[1:], min_idxd.indices[1:])]))
+        new_idxd = sympy.Indexed(i.base,
+                                 *([i.indices[0]] + [j - k for j, k in zip(i.indices[1:], min_idxd.indices[1:])]))
         substitutions[i] = new_idxd
     return term[0], term[1].subs(substitutions)
 
@@ -317,13 +327,21 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
         if not self.enabled:
             return
         if self.frontend.solved_pdes:
+            # First we remove any free numbers (e.g. 0.322984)
+            # from the solved PDEs and add them as biases to the IR
+            self.frontend.ir['biases'] = {}
+            for k, v in self.frontend.solved_pdes.items():
+                free_numbers = v.as_coeff_Add()
+                self.frontend.ir['biases'][k] = free_numbers[0]
+                self.frontend.solved_pdes[k] = free_numbers[1]
             # We expand the expressions and get all terms. Then we factor out the constants from each term
             # and sort the terms first by the number of indexed variables in each term and
             # then by the absolute value of the sum of the indices in the indexed variables
             # and finally by the number of atoms in the term.
             # This is done to bring more "general" terms closer to the front,
             # as well as terms which are more "centered".
-            unk_eq_terms = [x.as_coeff_Mul() for k, v in self.frontend.solved_pdes.items() for x in sympy.Add.make_args(v.expand())]
+            unk_eq_terms = [x.as_coeff_Mul() for k, v in self.frontend.solved_pdes.items() for x in
+                            sympy.Add.make_args(v.expand())]
             pure_terms_centered = [_center_term(t) for t in unk_eq_terms]
             pure_terms_centered = _delete_duplicates(pure_terms_centered)
             pure_terms_idxd = [(c, t, len(list(t.atoms(sympy.Indexed)))) for c, t in pure_terms_centered]
@@ -356,7 +374,8 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
                             matches[i * len(pure_terms_centered) + j] = shft
                             break
             # Turning the matches into a 2D array
-            matches = [matches[i:i + len(pure_terms_centered)] for i in range(0, len(matches), len(pure_terms_centered))]
+            matches = [matches[i:i + len(pure_terms_centered)] for i in
+                       range(0, len(matches), len(pure_terms_centered))]
             matches = [next(item for item in enumerate(m) if item[1] is not None) for m in matches]
             matches = [(pure_terms_centered[i], j) for i, j in matches]
             # We now create the features. We start by creating a dictionary of features for each unknown.
@@ -374,9 +393,11 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
             #     self.frontend.solved_pdes[k] = sympy.nsimplify(v)
             # We substitute the features in the solved PDEs
             self.frontend.ir = {
+                'biases': self.frontend.ir.get('biases', {}),
                 'features': {sympy.IndexedBase(f"__FEATURE_{i}"): [i, v] for i, v in enumerate(feature_list)},
                 'eqs': {k: v.subs(subs_dict, simultaneous=True) for k, v in self.frontend.solved_pdes.items()},
             }
+
 
 def _find_iminmax(disc):
     imin = np.zeros(len(disc[0].order), dtype=int) + 100
@@ -428,7 +449,8 @@ class PrepareIRPhase(FrontEndPhase):
             self.frontend.ir = {
                 'pdes': self.frontend.pde_system,
                 'features': self.frontend.ir['features'],
-                'stencil': self.frontend.ir['stencil']
+                'stencil': self.frontend.ir['stencil'],
+                'biases': self.frontend.ir['biases']
             }
 
 
@@ -445,6 +467,7 @@ class PDEFrontEnd(object):
         self.funcs = kwargs.get('funcs', None)
         self.solved_pdes = None
         self.shift_time_steps = False
+        self.kwargs = kwargs
         self.ir = {}
         self.phases = [
             SimplifyDerivativesPhase(self, True),
@@ -459,7 +482,17 @@ class PDEFrontEnd(object):
         ]
 
     def execute(self):
-        [phase() for phase in self.phases]
+        timing = {}
+        for phase in self.phases:
+            t_start = time.time()
+            phase()
+            t_end = time.time()
+            timing[phase.name] = t_end - t_start
+        timing['total'] = sum(timing.values())
+        if self.kwargs.get('timeit', False):
+            import pandas as pd
+            timing['num_terms'] = len(sympy.Add.make_args(sum(self.solved_pdes.values())))
+            pd.DataFrame(timing, index=[0]).to_csv("generated-data/" + self.ir['pdes'].name + '.timing.frontend.csv')
         return self.ir
 
     def __str__(self):
