@@ -171,7 +171,7 @@ if __name__ == '__main__':
     generate_ics(problem_dir, prob_sz)
     for prob in probs:
         file_name = f"{problem_dir}/{prob['pde'].name.replace('-', '_')}.py"
-        sol_hypercube = [prob_sz // 5, prob_sz, prob_sz] if '2d' in prob['pde'].name else [prob_sz // 5, prob_sz]
+        sol_hypercube = [prob_sz // 5, prob_sz, prob_sz] if '2D' in prob['pde'].name else [prob_sz // 5, prob_sz]
         print(f"Generating {file_name}")
         with open(file_name, 'w') as prob_generated_code:
             code = pde_compile(prob["pde"], prob["disc"], funcs={
