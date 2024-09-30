@@ -1,4 +1,5 @@
 .idea
 generated-code
+generated-data
 *.npy
 burgers.py
