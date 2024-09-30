@@ -1,5 +1,9 @@
 .idea
 generated-code
 generated-data
+plots/*.svg
 *.npy
+*.csv
+*.onnx
+*.sarif
 burgers.py
