@@ -313,6 +313,22 @@ def _delete_duplicates(terms):
     return terms
 
 
+def _fast_equals(a, b):
+    if a.free_symbols != b.free_symbols:
+        return False
+    if isinstance(a, sympy.Function) and isinstance(b, sympy.Function):
+        return a == b
+    vars = list(a.free_symbols)
+    for i in range(2):
+        vars_n = np.random.random(len(vars))
+        n_a = complex(a.subs({v: n for v, n in zip(vars, vars_n)}))
+        n_b = complex(b.subs({v: n for v, n in zip(vars, vars_n)}))
+        if not np.allclose(n_a, n_b):
+            return False
+    diff = a - b
+    return sympy.simplify(diff) == 0
+
+
 class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
     def __init__(self, frontend, enabled=True, max_features=4):
         super().__init__("create_auxiliary_features",
@@ -368,8 +384,7 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
                                     [idxd.indices[0]] + [i + j for i, j in zip(idxd.indices[1:], shft)]))
                             substitutions[idxd] = new_idxd
                         new_expr = unk_eq_terms[i][1].subs(substitutions, simultaneous=True)
-                        diff = sympy.simplify(new_expr - pure_terms_centered[j][1])
-                        if diff == 0:
+                        if _fast_equals(new_expr, pure_terms_centered[j][1]):
                             matches[i * len(pure_terms_centered) + j] = shft
                             break
             # Turning the matches into a 2D array
