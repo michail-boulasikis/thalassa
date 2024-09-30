@@ -8,7 +8,7 @@ import time
 
 t, x, y = sympy.symbols('t x y')
 u, v, p = sympy.Function('u'), sympy.Function('v'), sympy.Function('p')
-f, g, h = sympy.Function('f'), sympy.Function('g'), sympy.Function('h')
+f, g, h1, h2 = sympy.Function('f'), sympy.Function('g'), sympy.Function('h1'), sympy.Function('h2')
 
 probs = [
     {
@@ -82,7 +82,7 @@ probs = [
     },
     {
         # Wave equation in 2D
-        "pde": thalassa.PDESystem([Eq(D(u(t, x, y), t) - 0.05 * D(u(t, x, y), x, x) - 0.05 * D(u(t, x, y), y, y), 0)], [u(t, x, y)],
+        "pde": thalassa.PDESystem([Eq(D(u(t, x, y), (t, 2)) - 0.05 * D(u(t, x, y), x, x) - 0.05 * D(u(t, x, y), y, y), 0)], [u(t, x, y)],
                                   [t, x, y], name='W-2D'),
         "disc": [
             thalassa.fdm_simple_partial_derivative(D(u(t, x, y), (x, 2)), 0.05, method='central'),
@@ -104,9 +104,9 @@ probs = [
     {
         "pde": thalassa.PDESystem([
             Eq(D(u(t, x, y), t) + u(t, x, y) * D(u(t, x, y), x) + v(t, x, y) * D(u(t, x, y), y),
-               0.02 * (D(u(t, x, y), (x, 2)) + D(u(t, x, y), (y, 2))) + f(t, x, y)),
+               0.02 * (D(u(t, x, y), (x, 2)) + D(u(t, x, y), (y, 2))) + h1(t, x, y)),
             Eq(D(v(t, x, y), t) + v(t, x, y) * D(v(t, x, y), y) + u(t, x, y) * D(v(t, x, y), x),
-               0.02 * (D(v(t, x, y), (x, 2)) + D(v(t, x, y), (y, 2))) + h(t, x, y))
+               0.02 * (D(v(t, x, y), (x, 2)) + D(v(t, x, y), (y, 2))) + h2(t, x, y))
         ], [u(t, x, y), v(t, x, y)], [t, x, y], name='W-B2-2D'),
         "disc": [
             thalassa.fdm_simple_partial_derivative(D(u(t, x, y), x), 0.05, method='central'),
@@ -175,8 +175,10 @@ if __name__ == '__main__':
         print(f"Generating {file_name}")
         with open(file_name, 'w') as prob_generated_code:
             code = pde_compile(prob["pde"], prob["disc"], funcs={
-                    'f': sympy.sin(sympy.pi * x),
-                    'g': 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t)
+                    f(x): sympy.sin(sympy.pi * x),
+                    g(t, x): 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t),
+                    h1(t, x, y): 'external',
+                    h2(t, x, y): 'external'
                 }, sol_hypercube=sol_hypercube, output='plot', ics='external', target='pytorch', loop_iterations=5,
                             dt=0.0002, timeit=True)
             prob_generated_code.write(code)

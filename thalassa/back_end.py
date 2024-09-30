@@ -90,7 +90,7 @@ class CodeEmitter(object):
             self.emit(f"{res_name} = {name}({', '.join(args)})")
         else:
             res_name = self.make_temp()
-            self.emit(f"{res_name} = {func.name}{'[time_step]' if self.ir['pdes'].free_symbols[0] in func.args else ''}")
+            self.emit(f"{res_name} = {func.name}{'[time_step]' if 'self.' + self.ir['pdes'].free_symbols[0].name in map(str, func.args) else ''}")
 
     @dispatch(sympy.Pow)
     def emit(self, tree):

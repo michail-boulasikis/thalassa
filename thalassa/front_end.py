@@ -88,7 +88,6 @@ class SubstituteFreeFunctionsPhase(FrontEndPhase):
                     self.frontend.pde_system.equations = [
                         eq.subs(func, new_func) for eq in self.frontend.pde_system.equations]
                     self.frontend.pde_system.free_functions.append(new_func)
-        self.frontend.pde_system.equations = [eq.simplify() for eq in self.frontend.pde_system.equations]
 
 
 class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
