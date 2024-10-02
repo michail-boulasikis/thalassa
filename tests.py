@@ -165,20 +165,21 @@ def generate_ics(dir_path, cube_sz=65):
 
 if __name__ == '__main__':
     problem_dir = "generated-code"
-    prob_sz = 128
+    prob_sz = 1200
+    l_iter = 100
     if not os.path.exists(problem_dir):
         os.makedirs(problem_dir)
     generate_ics(problem_dir, prob_sz)
     for prob in probs:
         file_name = f"{problem_dir}/{prob['pde'].name.replace('-', '_')}.py"
-        sol_hypercube = [prob_sz // 5, prob_sz, prob_sz] if '2D' in prob['pde'].name else [prob_sz // 5, prob_sz]
+        sol_hypercube = [prob_sz // l_iter, prob_sz, prob_sz] if '2D' in prob['pde'].name else [prob_sz // l_iter, prob_sz]
         print(f"Generating {file_name}")
         with open(file_name, 'w') as prob_generated_code:
             code = pde_compile(prob["pde"], prob["disc"], funcs={
                     f(x): sympy.sin(sympy.pi * x),
                     g(t, x): 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t),
-                    h1(t, x, y): 'external',
-                    h2(t, x, y): 'external'
-                }, sol_hypercube=sol_hypercube, output='plot', ics='external', target='pytorch', loop_iterations=5,
-                            dt=0.0002, timeit=True)
+                    h1(t, x, y): 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t) * sympy.sin(2 * sympy.pi * y),
+                    h2(t, x, y): 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t) * sympy.sin(2 * sympy.pi * y)
+                }, sol_hypercube=sol_hypercube, output='external', ics='external', target='pytorch', loop_iterations=l_iter,
+                            dt=0.002, timeit=True, device='cuda:0')
             prob_generated_code.write(code)

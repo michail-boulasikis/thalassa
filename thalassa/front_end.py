@@ -460,11 +460,15 @@ class PrepareIRPhase(FrontEndPhase):
         if not self.enabled:
             return
         if self.frontend.ir:
+            imin, imax = _find_iminmax(self.frontend.discretizations)
+            imin = imin[1:]
+            imax = imax[1:]
             self.frontend.ir = {
                 'pdes': self.frontend.pde_system,
                 'features': self.frontend.ir['features'],
                 'stencil': self.frontend.ir['stencil'],
-                'biases': self.frontend.ir['biases']
+                'biases': self.frontend.ir['biases'],
+                'hypercube': (imax - imin).tolist(),
             }
 
 
