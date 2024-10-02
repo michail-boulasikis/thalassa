@@ -2,6 +2,8 @@
 generated-code
 generated-data
 plots/*.svg
+plots/*.eps
+reports
 *.npy
 *.csv
 *.onnx
