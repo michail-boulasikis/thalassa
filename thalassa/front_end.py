@@ -318,6 +318,12 @@ def _fast_equals(a, b):
         return False
     if isinstance(a, sympy.Function) and isinstance(b, sympy.Function):
         return a == b
+    # Substitute all functions in the expressions with random numbers
+    fs = [x for x in a.atoms(sympy.Function) if isinstance(x.__class__, sympy.core.function.UndefinedFunction)]
+    for f in fs:
+        n = np.random.random()
+        a = a.subs(f, n)
+        b = b.subs(f, n)
     vars = list(a.free_symbols)
     for i in range(2):
         vars_n = np.random.random(len(vars))
@@ -355,8 +361,9 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
             # and finally by the number of atoms in the term.
             # This is done to bring more "general" terms closer to the front,
             # as well as terms which are more "centered".
+            funcs = [f for eq in self.frontend.solved_pdes.values() for f in eq.atoms(sympy.Function)]
             unk_eq_terms = [x.as_coeff_Mul() for k, v in self.frontend.solved_pdes.items() for x in
-                            sympy.Add.make_args(v.expand())]
+                            sympy.Add.make_args(v.expand().collect(funcs))]
             pure_terms_centered = [_center_term(t) for t in unk_eq_terms]
             pure_terms_centered = _delete_duplicates(pure_terms_centered)
             pure_terms_idxd = [(c, t, len(list(t.atoms(sympy.Indexed)))) for c, t in pure_terms_centered]
@@ -385,7 +392,7 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
                             substitutions[idxd] = new_idxd
                         new_expr = unk_eq_terms[i][1].subs(substitutions, simultaneous=True)
                         if _fast_equals(new_expr, pure_terms_centered[j][1]):
-                            matches[i * len(pure_terms_centered) + j] = shft
+                            matches[i * len(pure_terms_centered) + j] = -shft
                             break
             # Turning the matches into a 2D array
             matches = [matches[i:i + len(pure_terms_centered)] for i in
@@ -401,15 +408,17 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
             expr_match_pairs = list(zip(list(range(len(unk_eq_terms))), unk_eq_terms, matches))
             for j, (coeff_term, term_expr), ((pure_coeff, pure_term), offset) in expr_match_pairs:
                 feature_base = sympy.IndexedBase(f"__FEATURE_{feature_list.index(pure_term)}")
-                subs_dict[term_expr] = feature_base[[0] + offset.tolist()]
+                offsets = offset.tolist()
+                subs_dict[term_expr] = feature_base[[0] + offsets]
             # Needed, otherwise substitution will not work
             # for k, v in self.frontend.solved_pdes.items():
             #     self.frontend.solved_pdes[k] = sympy.nsimplify(v)
             # We substitute the features in the solved PDEs
+
             self.frontend.ir = {
                 'biases': self.frontend.ir.get('biases', {}),
                 'features': {sympy.IndexedBase(f"__FEATURE_{i}"): [i, v] for i, v in enumerate(feature_list)},
-                'eqs': {k: v.subs(subs_dict, simultaneous=True) for k, v in self.frontend.solved_pdes.items()},
+                'eqs': {k: v.expand().collect(funcs).subs(subs_dict, simultaneous=True) for k, v in self.frontend.solved_pdes.items()},
             }
 
 
@@ -439,7 +448,8 @@ class ComputeStencilCoefficients(FrontEndPhase):
             n_unknowns = len(self.frontend.pde_system.unknowns)
             stencil = np.zeros(shape=(n_unknowns, n_total_features, *kernel_slice_shape), dtype=np.float64)
             for unk_idx, (unk, expr) in enumerate(self.frontend.ir['eqs'].items()):
-                for t in sympy.Add.make_args(expr.expand()):
+                ts = sympy.Add.make_args(expr.expand())
+                for t in ts:
                     multiplicative_constant = t.as_coeff_Mul()[0] if len(t.as_coeff_Mul()) > 1 else 1
                     feature = t.atoms(sympy.Indexed).pop()
                     feature_number = self.frontend.ir['features'][feature.base][0]

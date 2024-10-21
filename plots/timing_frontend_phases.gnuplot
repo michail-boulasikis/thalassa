@@ -1,4 +1,4 @@
-set terminal eps font "Arial,8" size 3.3in,2in
+set terminal eps font "Arial,8" size 3.3in,2.8in
 set output 'plots/timing_frontend_phases.eps'
 
 set datafile separator ','

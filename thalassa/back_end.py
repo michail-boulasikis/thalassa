@@ -112,6 +112,7 @@ class CodeEmitter(object):
                 -i if i < 0 else 0,
                 i if i > 0 else 0
             ) for i in indices[1:]]
+            paddings = paddings[::-1]
             slices = [f"{j if j != 0 else ''}:{-i if i != 0 else ''}" for i, j in paddings[::-1]]
             slices = ', '.join(slices)
             paddings = list(itertools.chain(*paddings))
@@ -121,7 +122,7 @@ class CodeEmitter(object):
                sympy.core.numbers.Number, sympy.core.numbers.Pi, sympy.core.numbers.Exp1))
     def emit(self, num):
         res_name = self.make_temp()
-        self.emit(f"{res_name} = {str(float(num))}")
+        self.emit(f"{res_name} = {str(sympy.N(num, 20))}")
 
     @dispatch(sympy.Symbol)
     def emit(self, symbol):
@@ -227,10 +228,11 @@ class BackEndPhase(ABC):
 
 
 class ResolveImportsPhase(BackEndPhase):
-    def __init__(self, backend, enabled=True, output=None, ics='external'):
+    def __init__(self, backend, enabled=True, output=None, ics='external', device='cpu'):
         super().__init__("resolve_imports", "Resolves import statements depending on input options.", backend, enabled)
         self.plot = output == 'plot'
         self.ics = ics
+        self.device = device
 
     def __call__(self):
         if self.enabled:
@@ -238,6 +240,9 @@ class ResolveImportsPhase(BackEndPhase):
             code = self.backend.code
             code.emit_import("torch", None)
             code.emit_import("torch.nn.functional", "F")
+            if self.device == 'dev':
+                code.emit_import("torch_xla.core.xla_model", "xm")
+                code.emit_import("torch_xla.distributed.xla_multiprocessing", "xmp")
             # Needed for loading initial conditions and any other external data
             if self.ics == 'external' or self.backend.ir['pdes'].free_functions:
                 code.emit_import("numpy", "np")
@@ -245,6 +250,9 @@ class ResolveImportsPhase(BackEndPhase):
             # Needed only for plotting
             if self.plot:
                 code.emit_import("matplotlib.pyplot", "plt")
+            if self.device == 'dev':
+                code.emit("")
+                code.emit("dev = xm.xla_device()")
             code.emit("")
 
 
@@ -283,7 +291,7 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             code = self.backend.code
             code.emit("class PDEISL(torch.nn.Module):")
             code.increase_indent()
-            set_all_symbols = _get_all_used_symbols(self.backend)
+            set_all_symbols = _get_all_used_symbols(self.backend, order_them=True)
             code.emit(f"def __init__(self, time_step: int, conv_kernel: torch.Tensor, {', '.join(set_all_symbols)}):")
             code.increase_indent()
             code.emit("super().__init__()")
@@ -302,7 +310,7 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             biases = sorted(biases, key=lambda x: self.backend.symbol_total_order_str.index(x[0].base.name))
             biases = list(map(lambda x: x[1], biases))
             code.emit(
-                f"self.conv_layer.bias = torch.nn.Parameter(torch.tensor({str(biases)}, dtype={self.backend.tensor_type}).to(device='{self.backend.device}'), requires_grad=False)")
+                f"self.conv_layer.bias = torch.nn.Parameter(torch.tensor({str(biases)}, dtype={self.backend.tensor_type}).to(device={self.backend.device}), requires_grad=False)")
             # Generate code that instantiates feature layers
             for idx, (k, (_, _, unknown_vars, other_vars, _)) in enumerate(self.backend.ir['features'].items()):
                 feat_name = f"PDEFeature{idx}"
@@ -343,12 +351,17 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             code.emit("")
 
 
-def _get_all_used_symbols(backend, tt=True):
-    set_all_symbols = []
+def _get_all_used_symbols(backend, tt=True, order_them=False):
+    set_all_symbols = set()
     for idx, (_, (_, _, _, other_vars, _)) in enumerate(backend.ir['features'].items()):
-        feat_args = list(map(lambda x: f"{x.name}{': torch.Tensor' if tt else ''}", other_vars))
-        set_all_symbols.extend(feat_args)
-    return list(set(set_all_symbols))
+        feat_args = list(map(lambda x: f"{x.name}", other_vars))
+        set_all_symbols = set_all_symbols.union(set(feat_args))
+    set_all_symbols = list(set_all_symbols)
+    if order_them:
+        set_all_symbols = backend.order_symbols_by_total_order(set_all_symbols)
+    if tt:
+        set_all_symbols = list(map(lambda x: f"{x}: torch.Tensor", set_all_symbols))
+    return set_all_symbols
 
 
 class CodeGenMainNetworkPhase(BackEndPhase):
@@ -363,15 +376,15 @@ class CodeGenMainNetworkPhase(BackEndPhase):
             code = self.backend.code
             code.emit("class PDENetwork(torch.nn.Module):")
             code.increase_indent()
-            set_all_symbols = _get_all_used_symbols(self.backend, tt=False)
-            set_all_symbols_args = ', '.join(f'{x}' for x in _get_all_used_symbols(self.backend))
+            set_all_symbols = _get_all_used_symbols(self.backend, tt=False, order_them=True)
+            set_all_symbols_args = ', '.join(f'{x}' for x in _get_all_used_symbols(self.backend, tt=True, order_them=True))
             code.emit(f"def __init__(self, {set_all_symbols_args}):")
             code.increase_indent()
             code.emit("super().__init__()")
             for x in set_all_symbols:
                 code.emit(f"self.{x} = {x}")
             code.emit(f"self.time_steps = {self.time_steps}")
-            code.emit(f"self.conv_kernel = torch.tensor({np.array2string(self.backend.ir['stencil'], separator=',')}, dtype={self.backend.tensor_type}).to(device='{self.backend.device}')")
+            code.emit(f"self.conv_kernel = torch.tensor({np.array2string(self.backend.ir['stencil'], separator=',', floatmode='unique')}, dtype={self.backend.tensor_type}).to(device={self.backend.device})")
             code.decrease_indent()
             code.emit("")
             code.emit("def forward(self, ics: torch.Tensor, i: int):")
@@ -383,6 +396,17 @@ class CodeGenMainNetworkPhase(BackEndPhase):
             code.reset_indent()
             code.emit("")
 
+
+def _get_device(device):
+    match device:
+        case 'cpu':
+            return '\'cpu\''
+        case 'gpu':
+            return '\'cuda:0\''
+        case 'tpu':
+            return 'dev'
+        case _:
+            raise ValueError(f"Unknown device '{device}' provided to 'pde_compile'. Supported devices are: [cpu, gpu, tpu]")
 
 class CodeGenMainFunctionPhase(BackEndPhase):
     def __init__(self, backend, enabled=True, ics='external', outcome='external', hypercube=None, loop_iterations=20):
@@ -401,36 +425,40 @@ class CodeGenMainFunctionPhase(BackEndPhase):
             code.emit("")
             code.emit("if __name__ == '__main__':")
             code.increase_indent()
+            code.emit('import time')
             for i, (sym, dim) in enumerate(zip(self.backend.ir['pdes'].free_symbols, self.hypercube)):
-                code.emit(f"{sym.name} = torch.linspace(0, 1, {dim * (self.loop_iterations if i == 0 else 1)}, dtype={self.backend.tensor_type}).to(device='{self.backend.device}')")
+                code.emit(f"{sym.name} = torch.linspace(0, 1, {dim * (self.loop_iterations if i == 0 else 1)}, dtype={self.backend.tensor_type}).to(device={self.backend.device})")
 
-                if i > 0:
-                    code.emit(f"{sym.name} = F.pad({sym.name}, {str([self.backend.ir['hypercube'][i - 1] // 2, self.backend.ir['hypercube'][i - 1] // 2])}, value=0.)")
             if len(self.hypercube) > 2:
                 code.emit(f"{', '.join([x.name for x in self.backend.ir['pdes'].free_symbols[1:]])} = torch.meshgrid({', '.join([x.name for x in self.backend.ir['pdes'].free_symbols[1:]])}, indexing='ij')")
             i = 1
             if self.ics == 'external':
                 for sym in self.backend.ir['pdes'].unknowns:
-                    code.emit(f"{sym.name} = torch.tensor(np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device='{self.backend.device}')")
+                    code.emit(f"{sym.name} = torch.tensor(np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device={self.backend.device})")
                     i += 1
             for sym in self.backend.ir['pdes'].free_functions:
                 if (funcs := self.backend.kwargs.get('funcs', None)) is not None:
                     if funcs[sym] == 'external':
                         code.emit(
-                            f"{sym.name} = torch.tensor(np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device='{self.backend.device}')")
+                            f"{sym.name} = torch.tensor(np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device={self.backend.device})")
                         i += 1
             ics = ', '.join([f"{x.name}" for x in self.backend.ir['pdes'].unknowns])
             code.emit(f"initial_conditions = torch.stack([{ics}])")
-            set_all_symbols = _get_all_used_symbols(self.backend, tt=False)
-            code.emit(f"network = PDENetwork({', '.join(set_all_symbols)}).to(device='{self.backend.device}')")
+            set_all_symbols = _get_all_used_symbols(self.backend, tt=False, order_them=True)
+            code.emit(f"network = PDENetwork({', '.join(set_all_symbols)}).to(device={self.backend.device})")
+            code.emit(f"t_start = time.time()")
             code.emit(f"for i in range({self.loop_iterations}):")
             code.increase_indent()
             code.emit("initial_conditions = network(initial_conditions, i)")
             code.decrease_indent()
-            code.emit(f"initial_conditions = initial_conditions{'.cpu()' if 'cuda' in self.backend.device else ''}.detach().numpy()")
+            code.emit(f"t_end = time.time()")
+            code.emit("print(f'Time elapsed: {t_end - t_start} seconds')")
+            call_to_cpu = ".cpu()" if self.backend.device != '\'cpu\'' else ""
+            code.emit(f"initial_conditions = initial_conditions{call_to_cpu}.detach().numpy()")
             match self.outcome:
                 case 'external':
                     code.emit(f"np.save(sys.argv[{i}], initial_conditions)")
+                    # code.emit(f"np.savetxt(sys.argv[{i}] + '.txt', initial_conditions, delimiter='\\n')")
                 case 'plot':
                     n_unknowns = len(self.backend.ir['pdes'].unknowns)
                     n_dims = len(self.backend.ir['pdes'].free_symbols) - 1
@@ -456,7 +484,7 @@ class PytorchPDEBackEnd(object):
         self.ir = ir
         self.stencil = None
         self.tensor_type = _get_acc(kwargs.get('num_acc', 'f64'))
-        self.device = kwargs.get('device', 'cpu')
+        self.device = _get_device(kwargs.get('device', 'cpu'))
         self.code = CodeEmitter()
         self.code.ir = self.ir
         self.symbol_total_order = [
@@ -468,7 +496,7 @@ class PytorchPDEBackEnd(object):
         self.n_features = len(self.ir['features'])
         self.kwargs = kwargs
         self.phases = [
-            ResolveImportsPhase(self, True, kwargs.get('output', False), kwargs.get('ics', 'external')),
+            ResolveImportsPhase(self, True, kwargs.get('output', False), kwargs.get('ics', 'external'), self.device),
             CodeGenAuxiliaryFeaturesPhase(self, True),
             CodeGenStencilApplicationPhase(self, True),
             CodeGenMainNetworkPhase(self, True, kwargs.get('sol_hypercube', [20])[0]),

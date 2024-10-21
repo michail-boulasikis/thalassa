@@ -1,5 +1,7 @@
 import os
 import sys
+
+import numpy as np
 import pandas as pd
 
 # Folder with CSV files
@@ -38,4 +40,13 @@ frontend_measurements.columns = [col.replace('_', ' ').capitalize() for col in f
 frontend_measurements = frontend_measurements.sort_values(by='Total', ascending=True)
 frontend_measurements.to_csv('frontend_measurements.csv', index=False)
 
-# For the titles, remove the '_' and capitalize the first letter
+
+time_measurements_cpu = np.loadtxt('time_measurements_cpu.txt').reshape(13, 5, order='F').mean(axis=1)
+time_measurements_gpu = np.loadtxt('time_measurements_gpu.txt').reshape(13, 5, order='F').mean(axis=1)
+problems = ['T-1D', 'T-NC-1D', 'T-F-1D', 'T-B1-1D', 'T-B2-1D', 'T-B3-1D', 'H-1D', 'H-KPP1-1D', 'H-KPP2-1D', 'H-KPP3-1D', 'W-2D', 'W-B1-2D', 'W-B2-2D']
+# Save the CPU and GPU time measurements in a DataFrame along with the problem names
+time_measurements = pd.DataFrame()
+time_measurements['Problem'] = problems
+time_measurements['CPU'] = time_measurements_cpu
+time_measurements['GPU'] = time_measurements_gpu
+time_measurements.to_csv('generated-data/time_measurements.csv', index=False)
