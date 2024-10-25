@@ -12,7 +12,7 @@ f, g, h1, h2 = sympy.Function('f'), sympy.Function('g'), sympy.Function('h1'), s
 
 solve_2d = True
 
-Nt = 20000
+Nt = 200
 Nx = 800
 dx = 1.0 / (Nx - 1)
 dt = 1.0 / (Nt - 1)
@@ -194,10 +194,8 @@ if __name__ == '__main__':
             code = pde_compile(prob["pde"], prob["disc"], funcs={
                 f(x): -0.05 - 0.02 * sympy.sin(sympy.pi * x),
                 g(t, x): 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t),
-                h1(t, x, y): 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t) * sympy.sin(
-                    2 * sympy.pi * y),
-                h2(t, x, y): 0.05 * sympy.sin(8 * sympy.pi * x) * sympy.sin(2 * sympy.pi * t) * sympy.sin(
-                    2 * sympy.pi * y)
+                h1(t, x, y): 'external',
+                h2(t, x, y): 'external'
             }, sol_hypercube=sol_hypercube, output='external', ics='external', target='pytorch', loop_iterations=1,
                                dt=dt, timeit=True, device='gpu', num_acc='f32')
             prob_generated_code.write(code)

@@ -78,16 +78,14 @@ class SubstituteFreeFunctionsPhase(FrontEndPhase):
 
     def __call__(self):
         if self.enabled and self.funcs:
-            self.frontend.pde_system.free_functions = []
             for func, expr in self.funcs.items():
+                # If the expression is not 'external', we assume it is a sympy expression and substitute it in the PDE
                 if expr != "external":
                     self.frontend.pde_system.equations = [eq.subs(func, expr) for eq in
                                                           self.frontend.pde_system.equations]
-                else:
-                    new_func = sympy.Function(func.name)(*func.args)
-                    self.frontend.pde_system.equations = [
-                        eq.subs(func, new_func) for eq in self.frontend.pde_system.equations]
-                    self.frontend.pde_system.free_functions.append(new_func)
+                    # Remove the function from the list of free functions
+                    self.frontend.pde_system.free_functions = [f for f in self.frontend.pde_system.free_functions if
+                                                               f != func]
 
 
 class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
@@ -98,44 +96,56 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
         self.dt = dt
 
     def __call__(self):
-        derivs = [elem for elems in
-                  list(map(lambda x: [(sum(z == self.frontend.pde_system.free_symbols[0] for z in y.variables), y.expr)
-                                      for y in x],
-                           [eq.atoms(sympy.Derivative) for eq in self.frontend.pde_system.equations])) for elem in
-                  elems]
+        # Set of all derivatives in the PDE system
+        derivs = set.union(*[eq.atoms(sympy.Derivative) for eq in self.frontend.pde_system.equations])
+        # Finding the order of each derivative in time
+        orders = [sum(z == self.frontend.pde_system.free_symbols[0] for z in d.variables) for d in derivs]
+        # Pairing the order with the derivative's expression
+        derivs = list(zip(orders, [d.expr for d in derivs]))
         # Grouping the tuples by unknown
         derivs = [list(filter(lambda x: x[1] == unk, derivs)) for unk in self.frontend.pde_system.unknowns]
         # Finding the maximum order of each unknown
         max_order = [max(d, key=lambda x: x[0]) for d in derivs]
-        # Filtering the unknowns which have order < 2
+        # Filtering the unknowns which have order < 2 (no need to introduce new variables)
         max_order = list(filter(lambda x: x[0] >= 2, max_order))
+        # Constructing a dictionary of maximum orders
         max_order = {e[1]: e[0] for e in max_order}
+        # Constructing the time discretizations for all already existing time derivatives
         time_discs = [
             thalassa.fdm_simple_partial_derivative(sympy.Derivative(d[0][1], self.frontend.pde_system.free_symbols[0]),
                                                    self.dt,
                                                    method='forward')
             for d in derivs]
         self.frontend.discretizations.extend(time_discs)
-        # Introduce new variables
-        new_vars = [
-            [k, *[sympy.Function(f'{k.name}_{i + 1}')(*self.frontend.pde_system.free_symbols) for i in range(v - 1)]]
-            for k, v in
-            max_order.items()]
+        # Introduce new variables ([u, u_1, u_2, ...], [v, v_1, v_2, ...], ...)
+        # with u and v already existing unknowns, which we use to construct the dictionary of new variables
+        new_vars = []
+        for k, v in max_order.items():
+            new_var_list = [k]
+            for i in range(v - 1):
+                new_var_list.append(sympy.Function(f'{k.name}_{i + 1}')(*self.frontend.pde_system.free_symbols))
+            new_vars.append(new_var_list)
         new_vars = {e[0]: e for e in new_vars}
         # If we have only first order derivatives, return as is
         if not new_vars:
             return
-        new_eqs = [sympy.Eq(sympy.Derivative(nv[idx - 1], self.frontend.pde_system.free_symbols[0]), var) for _, nv in
-                   new_vars.items() for
-                   idx, var in enumerate(nv) if idx > 0]
+        # Constructing the new equations which represent the time derivatives of the new variables
+        new_eqs = []
+        for _, nv in new_vars.items():
+            for idx, var in enumerate(nv[1:], start=1):
+                new_eqs.append(sympy.Eq(sympy.Derivative(nv[idx - 1], self.frontend.pde_system.free_symbols[0]), var))
         # Equation substitutions with new variables
         for i, eq in enumerate(self.frontend.pde_system.equations):
-            # Find the time derivatives in the equation
             substitutions = {}
-            eq_time_derivs = list(filter(
-                lambda x: self.frontend.pde_system.free_symbols[0] in x.variables
-                          and sum(z == self.frontend.pde_system.free_symbols[0] for z in x.variables) >= 1,
-                eq.atoms(sympy.Derivative)))
+            # Find the time derivatives in the equation
+            eq_time_derivs = []
+            for derivative in eq.atoms(sympy.Derivative):
+                # If time is in the function's free symbols and the derivative is at least of order 1 in time,
+                # then it is a time derivative
+                if (self.frontend.pde_system.free_symbols[0] in derivative.variables and
+                        sum(var == self.frontend.pde_system.free_symbols[0] for var in derivative.variables) >= 1):
+                    eq_time_derivs.append(derivative)
+            # Substitute the time derivatives with the new variables
             for d in eq_time_derivs:
                 # Special case when the time derivative is of maximum order
                 # (replaced with derivative of last new variable)
@@ -146,14 +156,15 @@ class TurnIntoFirstOrderSystemPhase(FrontEndPhase):
                     new_var = new_vars[d.expr][sum(z == self.frontend.pde_system.free_symbols[0] for z in d.variables)]
                 substitutions[d] = new_var
             self.frontend.pde_system.equations[i] = eq.subs(substitutions)
-        # Constructing the time discretizations for all variables
+        # Constructing the time discretizations for new variables
         time_discs = []
         for _, v in new_vars.items():
             time_discs.extend([thalassa.fdm_simple_partial_derivative(
                 sympy.Derivative(k, self.frontend.pde_system.free_symbols[0]), self.dt, method='forward') for k in
                 v[1:]])
         # Add new variables to the system in order (u, u_1, u_2, ... , v, v_1, v_2, ...)
-        # This is necessary because the order of unknowns is the order of supplied initial conditions
+        # Order matters, because the order of unknowns is the order of supplied initial conditions
+        # in the resultant solver
         self.frontend.pde_system.unknowns = [[k, *v[1:]] for k, v in new_vars.items()]
         # Flatten the list
         self.frontend.pde_system.unknowns = [item for sublist in self.frontend.pde_system.unknowns for item in sublist]
@@ -229,16 +240,26 @@ class SolveForNextTimestepPhase(FrontEndPhase):
     def __call__(self):
         if not self.enabled:
             return
-        # Solve the PDE system for the next timestep
-        # Find the largest time index for each unknown by searching all equations for indexed unknowns and taking the
-        # maximum time index for each unknown
-        indexed_vars = [idxd for eq in self.frontend.pde_system.equations for idxd in eq.atoms(sympy.Indexed)
-                        if idxd.base.name in map(lambda x: x.name, self.frontend.pde_system.unknowns)]
-        max_time_idx = {u: max([int(idxd.indices[0]) for idxd in indexed_vars if idxd.base.name == u], default=0)
-                        for u in map(lambda x: x.name, self.frontend.pde_system.unknowns)}
+        # NOTE: This works for all maximum time indices, even though in practice we only have 0 and 1
+        # Find the largest time index for each unknown by searching all equations for indexed unknowns
+        indexed_vars = []
+        for eq in self.frontend.pde_system.equations:
+            for idxd in eq.atoms(sympy.Indexed):
+                if idxd.base.name in map(lambda x: x.name, self.frontend.pde_system.unknowns):
+                    indexed_vars.append(idxd)
+
+        # Determine the maximum time index for each unknown
+        max_time_idx = {}
+        for u in map(lambda x: x.name, self.frontend.pde_system.unknowns):
+            max_time_idx[u] = max((int(idxd.indices[0]) for idxd in indexed_vars if idxd.base.name == u), default=0)
+
         # Create the variables we need to solve for
-        next_time_step_vars = [sympy.Indexed(u.name, *([max_time_idx[u.name]] + [0] * (len(u.args) - 1))) for u in
-                               self.frontend.pde_system.unknowns]
+        next_time_step_vars = []
+        for u in self.frontend.pde_system.unknowns:
+            indices = [max_time_idx[u.name]] + [0] * (len(u.args) - 1)
+            next_time_step_vars.append(sympy.Indexed(u.name, *indices))
+
+        # Solve for the unknowns' next time step
         solutions = sympy.solve(self.frontend.pde_system.equations, next_time_step_vars, dict=True)
         # Check if we have a unique solution
         if not solutions or len(solutions) > 1:
@@ -298,26 +319,21 @@ def _center_term(term):
 
 
 def _delete_duplicates(terms):
-    while True:
-        deletion = False
-        for i in range(len(terms)):
-            for j in range(i + 1, len(terms)):
-                if sympy.simplify(terms[i][1] - terms[j][1]) == 0:
-                    terms.pop(j)
-                    deletion = True
-                    break
-            if deletion:
-                break
-        if not deletion:
-            break
-    return terms
+    unique_terms = []
+    for term in terms:
+        if not any(_fast_equals(term[1], unique_term[1]) for unique_term in unique_terms):
+            unique_terms.append(term)
+    return unique_terms
 
 
 def _fast_equals(a, b):
+    # If the free symbols are different, the expressions are not equal
     if a.free_symbols != b.free_symbols:
         return False
+    # If the expressions are symbolic functions, we compare them directly
     if isinstance(a, sympy.Function) and isinstance(b, sympy.Function):
         return a == b
+    # We compare the expressions by substituting random numbers for the free symbols
     # Substitute all functions in the expressions with random numbers
     fs = [x for x in a.atoms(sympy.Function) if isinstance(x.__class__, sympy.core.function.UndefinedFunction)]
     for f in fs:
@@ -325,12 +341,14 @@ def _fast_equals(a, b):
         a = a.subs(f, n)
         b = b.subs(f, n)
     vars = list(a.free_symbols)
+    # If the expressions are not equal for two random substitutions, they are not equal
     for i in range(2):
         vars_n = np.random.random(len(vars))
         n_a = complex(a.subs({v: n for v, n in zip(vars, vars_n)}))
         n_b = complex(b.subs({v: n for v, n in zip(vars, vars_n)}))
         if not np.allclose(n_a, n_b):
             return False
+    # If we haven't returned by now, the expressions need to be compared symbolically to be sure
     diff = a - b
     return sympy.simplify(diff) == 0
 
