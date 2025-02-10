@@ -1,41 +1,37 @@
-import sympy
 from sympy import Eq, Function, symbols
 from sympy import Derivative as D
 import numpy as np
 import thalassa
 
+# Generate some initial conditions
+dt = 0.0001
+dx = 0.01
+tensor_type = np.float64
+xs = np.linspace(0, 1, int(1 / dx), dtype=tensor_type)
+u_initial = np.exp(-100 * (xs - 0.5) ** 2)
+np.save('u_burgers.npy', u_initial)
 
 t, x = symbols('t x')
 u = Function('u')(t, x)
-m1 = Function('m1')(x)
-# g = Function('g')(t, x)
-tensor_type = np.float64
+
+alpha = 0.001
 pde = thalassa.PDESystem(
     [Eq(
-        # D(u, t) + sympy.exp(u) * D(u, x), 0.005 * D(u, (x, 2))
-        # D(u, t) + u * D(u, x), 0.005 * D(u, (x, 2))
-        # D(u, t) + u * u * D(u, x), 0.005 * D(u, (x, 2))
-        D(u, t) + u * D(u, x), 0.005 * D(u, (x, 2))
+        D(u, t) + u * D(u, x), alpha * D(u, (x, 2))
     )],
     [u],
     [t, x]
 )
 
 disc = [
-    thalassa.fdm_simple_partial_derivative(D(u, (x, 1)), dx := 0.01, method='central'),
+    thalassa.fdm_simple_partial_derivative(D(u, (x, 1)), dx, method='central'),
     thalassa.fdm_simple_partial_derivative(D(u, (x, 2)), dx, method='central')
 ]
 
-dt = 0.0001
-xs = np.linspace(0, 1, int(1 / dx), dtype=tensor_type)
-u_initial = np.exp(-100 * (xs - 0.5) ** 2)
-
-np.save('u_burgers.npy', u_initial)
 
 with open('burgers.py', 'w') as output_file:
     code = thalassa.pde_compile(pde, disc, target='pytorch', ics='external', output='plot',
-                                sol_hypercube=[4, int(1 / dx)], dt=dt,
-                                funcs={m1: 'external'}, loop_iterations=250)
+                                sol_hypercube=[4, int(1 / dx)], dt=dt, loop_iterations=250)
     output_file.write(code)
 
 
