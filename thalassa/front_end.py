@@ -424,8 +424,9 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
             feature_list = list({f for (_, f), _ in matches})
             subs_dict = {}
             expr_match_pairs = list(zip(list(range(len(unk_eq_terms))), unk_eq_terms, matches))
+            feature_stem = "f_"
             for j, (coeff_term, term_expr), ((pure_coeff, pure_term), offset) in expr_match_pairs:
-                feature_base = sympy.IndexedBase(f"__FEATURE_{feature_list.index(pure_term)}")
+                feature_base = sympy.IndexedBase(f"{feature_stem}{feature_list.index(pure_term)}")
                 offsets = offset.tolist()
                 subs_dict[term_expr] = feature_base[[0] + offsets]
             # Needed, otherwise substitution will not work
@@ -435,7 +436,7 @@ class CreateAuxiliaryFeaturesPhase(FrontEndPhase):
 
             self.frontend.ir = {
                 'biases': self.frontend.ir.get('biases', {}),
-                'features': {sympy.IndexedBase(f"__FEATURE_{i}"): [i, v] for i, v in enumerate(feature_list)},
+                'features': {sympy.IndexedBase(f"{feature_stem}{i}"): [i, v] for i, v in enumerate(feature_list)},
                 'eqs': {k: v.expand().collect(funcs).subs(subs_dict, simultaneous=True) for k, v in self.frontend.solved_pdes.items()},
             }
 

@@ -1,4 +1,5 @@
 .idea
+.venv
 generated-code
 generated-data
 plots/*.svg

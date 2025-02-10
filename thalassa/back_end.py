@@ -90,7 +90,8 @@ class CodeEmitter(object):
             self.emit(f"{res_name} = {name}({', '.join(args)})")
         else:
             res_name = self.make_temp()
-            self.emit(f"{res_name} = {func.name}{'[time_step]' if 'self.' + self.ir['pdes'].free_symbols[0].name in map(str, func.args) else ''}")
+            self.emit(
+                f"{res_name} = {func.name}{'[time_step]' if 'self.' + self.ir['pdes'].free_symbols[0].name in map(str, func.args) else ''}")
 
     @dispatch(sympy.Pow)
     def emit(self, tree):
@@ -127,7 +128,8 @@ class CodeEmitter(object):
     @dispatch(sympy.Symbol)
     def emit(self, symbol):
         res_name = self.make_temp()
-        self.emit(f"{res_name} = {symbol.name}{'[time_step]' if 'self.' + self.ir['pdes'].free_symbols[0].name == symbol.name else ''}")
+        self.emit(
+            f"{res_name} = {symbol.name}{'[time_step]' if 'self.' + self.ir['pdes'].free_symbols[0].name == symbol.name else ''}")
 
     def emit_import(self, lib, lib_as):
         if lib_as is None:
@@ -240,6 +242,7 @@ class ResolveImportsPhase(BackEndPhase):
             code = self.backend.code
             code.emit_import("torch", None)
             code.emit_import("torch.nn.functional", "F")
+            # Needed if the code is compiled for Google TPUs
             if self.device == 'dev':
                 code.emit_import("torch_xla.core.xla_model", "xm")
                 code.emit_import("torch_xla.distributed.xla_multiprocessing", "xmp")
@@ -250,6 +253,7 @@ class ResolveImportsPhase(BackEndPhase):
             # Needed only for plotting
             if self.plot:
                 code.emit_import("matplotlib.pyplot", "plt")
+            # Needed if the code is compiled for Google TPUs
             if self.device == 'dev':
                 code.emit("")
                 code.emit("dev = xm.xla_device()")
@@ -286,37 +290,41 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
                          backend,
                          enabled)
 
+    def _emit_init(self):
+        code = self.backend.code
+        code.increase_indent()
+        set_all_symbols = _get_all_used_symbols(self.backend, order_them=True)
+        code.emit(f"def __init__(self, time_step: int, conv_kernel: torch.Tensor, {', '.join(set_all_symbols)}):")
+        code.increase_indent()
+        code.emit("super().__init__()")
+        code.emit("self.time_step = time_step")
+        dims = len(self.backend.ir['pdes'].free_symbols) - 1
+        n_unknowns = len(self.backend.ir['pdes'].unknowns)
+        code.emit(f"self.conv_layer = torch.nn.Conv{dims}d(")
+        code.increase_indent()
+        code.emit(
+            f"{self.backend.n_features}, {n_unknowns}, kernel_size={str(self.backend.ir['stencil'].shape[2:])}, stride=1, padding=0")
+        code.decrease_indent()
+        code.emit(")")
+        code.emit(f"self.conv_layer.weight = torch.nn.Parameter(conv_kernel, requires_grad=False)")
+        biases = [(k, v) for k, v in self.backend.ir['biases'].items()]
+        # Sort biases by the total order of symbols
+        biases = sorted(biases, key=lambda x: self.backend.symbol_total_order_str.index(x[0].base.name))
+        biases = list(map(lambda x: x[1], biases))
+        code.emit(
+            f"self.conv_layer.bias = torch.nn.Parameter(torch.tensor({str(biases)}, dtype={self.backend.tensor_type}).to(device={self.backend.device}), requires_grad=False)")
+        # Generate code that instantiates feature layers
+        for idx, (k, (_, _, unknown_vars, other_vars, _)) in enumerate(self.backend.ir['features'].items()):
+            feat_name = f"PDEFeature{idx}"
+            feat_args = ', '.join([f"{var.name}" for var in other_vars])
+            code.emit(f"self.{k.name} = {feat_name}({feat_args})")
+        code.decrease_indent()
+
     def __call__(self):
         if self.enabled:
             code = self.backend.code
             code.emit("class PDEISL(torch.nn.Module):")
-            code.increase_indent()
-            set_all_symbols = _get_all_used_symbols(self.backend, order_them=True)
-            code.emit(f"def __init__(self, time_step: int, conv_kernel: torch.Tensor, {', '.join(set_all_symbols)}):")
-            code.increase_indent()
-            code.emit("super().__init__()")
-            code.emit("self.time_step = time_step")
-            dims = len(self.backend.ir['pdes'].free_symbols) - 1
-            n_unknowns = len(self.backend.ir['pdes'].unknowns)
-            code.emit(f"self.conv_layer = torch.nn.Conv{dims}d(")
-            code.increase_indent()
-            code.emit(
-                f"{self.backend.n_features}, {n_unknowns}, kernel_size={str(self.backend.ir['stencil'].shape[2:])}, stride=1, padding=0")
-            code.decrease_indent()
-            code.emit(")")
-            code.emit(f"self.conv_layer.weight = torch.nn.Parameter(conv_kernel, requires_grad=False)")
-            biases = [(k, v) for k, v in self.backend.ir['biases'].items()]
-            # Sort biases by the total order of symbols
-            biases = sorted(biases, key=lambda x: self.backend.symbol_total_order_str.index(x[0].base.name))
-            biases = list(map(lambda x: x[1], biases))
-            code.emit(
-                f"self.conv_layer.bias = torch.nn.Parameter(torch.tensor({str(biases)}, dtype={self.backend.tensor_type}).to(device={self.backend.device}), requires_grad=False)")
-            # Generate code that instantiates feature layers
-            for idx, (k, (_, _, unknown_vars, other_vars, _)) in enumerate(self.backend.ir['features'].items()):
-                feat_name = f"PDEFeature{idx}"
-                feat_args = ', '.join([f"{var.name}" for var in other_vars])
-                code.emit(f"self.{k.name} = {feat_name}({feat_args})")
-            code.decrease_indent()
+            self._emit_init()
             code.emit("")
             code.emit("def forward(self, ics: torch.Tensor):")
             code.increase_indent()
@@ -326,7 +334,7 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             # Step 2: Apply boundary conditions in the form of padding (zeros=dirichlet)
             for unk in self.backend.ir['pdes'].unknowns:
                 # Pad all dimensions from both sides except the first one (batch size)
-                paddings = [(1, 1) for _ in range(dims)]
+                paddings = [(1, 1) for _ in range(len(self.backend.ir['pdes'].free_symbols) - 1)]
                 paddings = list(itertools.chain(*paddings))
                 # TODO: Other types of boundary conditions
                 code.emit(f"{unk.name} = F.pad({unk.name}, {str(paddings)}, value=0.)")
@@ -377,14 +385,16 @@ class CodeGenMainNetworkPhase(BackEndPhase):
             code.emit("class PDENetwork(torch.nn.Module):")
             code.increase_indent()
             set_all_symbols = _get_all_used_symbols(self.backend, tt=False, order_them=True)
-            set_all_symbols_args = ', '.join(f'{x}' for x in _get_all_used_symbols(self.backend, tt=True, order_them=True))
+            set_all_symbols_args = ', '.join(
+                f'{x}' for x in _get_all_used_symbols(self.backend, tt=True, order_them=True))
             code.emit(f"def __init__(self, {set_all_symbols_args}):")
             code.increase_indent()
             code.emit("super().__init__()")
             for x in set_all_symbols:
                 code.emit(f"self.{x} = {x}")
             code.emit(f"self.time_steps = {self.time_steps}")
-            code.emit(f"self.conv_kernel = torch.tensor({np.array2string(self.backend.ir['stencil'], separator=',', floatmode='unique')}, dtype={self.backend.tensor_type}).to(device={self.backend.device})")
+            code.emit(
+                f"self.conv_kernel = torch.tensor({np.array2string(self.backend.ir['stencil'], separator=',', floatmode='unique')}, dtype={self.backend.tensor_type}).to(device={self.backend.device})")
             code.decrease_indent()
             code.emit("")
             code.emit("def forward(self, ics: torch.Tensor, i: int):")
@@ -406,7 +416,9 @@ def _get_device(device):
         case 'tpu':
             return 'dev'
         case _:
-            raise ValueError(f"Unknown device '{device}' provided to 'pde_compile'. Supported devices are: [cpu, gpu, tpu]")
+            raise ValueError(
+                f"Unknown device '{device}' provided to 'pde_compile'. Supported devices are: [cpu, gpu, tpu]")
+
 
 class CodeGenMainFunctionPhase(BackEndPhase):
     def __init__(self, backend, enabled=True, ics='external', outcome='external', hypercube=None, loop_iterations=20):
@@ -419,42 +431,67 @@ class CodeGenMainFunctionPhase(BackEndPhase):
         self.hypercube = hypercube if hypercube is not None else [100] * len(self.backend.ir['pdes'].free_symbols)
         self.loop_iterations = loop_iterations
 
+    def _emit_coordinate_plane_vars(self):
+        code = self.backend.code
+        txyzs = self.backend.ir['pdes'].free_symbols
+        for i, (sym, dim) in enumerate(zip(txyzs, self.hypercube)):
+            N = dim * (self.loop_iterations if i == 0 else 1)
+            code.emit(f"{sym.name} = torch.linspace("
+                      f"0, 1, {N}, dtype={self.backend.tensor_type}).to(device={self.backend.device})")
+        if len(self.hypercube) > 2:
+            var_list_comma = ', '.join([x.name for x in txyzs[1:]])
+            code.emit(f"{var_list_comma} = torch.meshgrid({var_list_comma}, indexing='ij')")
+
+    def _emit_load_ics_and_free_funcs(self):
+        code = self.backend.code
+        i = 1
+        # First arguments are supposed to be the initial conditions
+        unks = self.backend.ir['pdes'].unknowns
+        if self.ics == 'external':
+            for sym in unks:
+                code.emit(f"{sym.name} = torch.tensor("
+                    f"np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device={self.backend.device})")
+                i += 1
+        # After the initial conditions come any free functions which have not been analytically defined
+        for sym in self.backend.ir['pdes'].free_functions:
+            funcs = self.backend.kwargs.get('funcs', None)
+            if funcs is not None and funcs[sym] == 'external':
+                code.emit(f"{sym.name} = torch.tensor("
+                          f"np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device={self.backend.device})")
+                i += 1
+        # Stack the initial conditions in one tensor
+        ics = ', '.join([f"{x.name}" for x in self.backend.ir['pdes'].unknowns])
+        code.emit(f"initial_conditions = torch.stack([{ics}])")
+        return i
+
+    def _emit_solver(self, timeit=False):
+        code = self.backend.code
+        set_all_symbols = _get_all_used_symbols(self.backend, tt=False, order_them=True)
+        code.emit(f"network = PDENetwork({', '.join(set_all_symbols)}).to(device={self.backend.device})")
+        if timeit:
+            code.emit('import time')
+            code.emit(f"t_start = time.time()")
+        code.emit(f"for i in range({self.loop_iterations}):")
+        code.increase_indent()
+        code.emit("initial_conditions = network(initial_conditions, i)")
+        code.decrease_indent()
+        if timeit:
+            code.emit(f"t_end = time.time()")
+            code.emit("print(f'Time elapsed: {t_end - t_start} seconds')")
+        call_to_cpu = ".cpu()" if self.backend.device != '\'cpu\'' else ""
+        code.emit(f"initial_conditions = initial_conditions{call_to_cpu}.detach().numpy()")
+
     def __call__(self):
         if self.enabled:
             code = self.backend.code
             code.emit("")
             code.emit("if __name__ == '__main__':")
             code.increase_indent()
-            code.emit('import time')
-            for i, (sym, dim) in enumerate(zip(self.backend.ir['pdes'].free_symbols, self.hypercube)):
-                code.emit(f"{sym.name} = torch.linspace(0, 1, {dim * (self.loop_iterations if i == 0 else 1)}, dtype={self.backend.tensor_type}).to(device={self.backend.device})")
-
-            if len(self.hypercube) > 2:
-                code.emit(f"{', '.join([x.name for x in self.backend.ir['pdes'].free_symbols[1:]])} = torch.meshgrid({', '.join([x.name for x in self.backend.ir['pdes'].free_symbols[1:]])}, indexing='ij')")
-            i = 1
-            if self.ics == 'external':
-                for sym in self.backend.ir['pdes'].unknowns:
-                    code.emit(f"{sym.name} = torch.tensor(np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device={self.backend.device})")
-                    i += 1
-            for sym in self.backend.ir['pdes'].free_functions:
-                if (funcs := self.backend.kwargs.get('funcs', None)) is not None:
-                    if funcs[sym] == 'external':
-                        code.emit(
-                            f"{sym.name} = torch.tensor(np.load(sys.argv[{i}]), dtype={self.backend.tensor_type}).to(device={self.backend.device})")
-                        i += 1
-            ics = ', '.join([f"{x.name}" for x in self.backend.ir['pdes'].unknowns])
-            code.emit(f"initial_conditions = torch.stack([{ics}])")
-            set_all_symbols = _get_all_used_symbols(self.backend, tt=False, order_them=True)
-            code.emit(f"network = PDENetwork({', '.join(set_all_symbols)}).to(device={self.backend.device})")
-            code.emit(f"t_start = time.time()")
-            code.emit(f"for i in range({self.loop_iterations}):")
-            code.increase_indent()
-            code.emit("initial_conditions = network(initial_conditions, i)")
-            code.decrease_indent()
-            code.emit(f"t_end = time.time()")
-            code.emit("print(f'Time elapsed: {t_end - t_start} seconds')")
-            call_to_cpu = ".cpu()" if self.backend.device != '\'cpu\'' else ""
-            code.emit(f"initial_conditions = initial_conditions{call_to_cpu}.detach().numpy()")
+            self._emit_coordinate_plane_vars()
+            # The number of arguments utilized so far is needed in case we need to save the data.
+            # The filename is given as the next argument.
+            i = self._emit_load_ics_and_free_funcs()
+            self._emit_solver(self.backend.kwargs.get('timeit', False))
             match self.outcome:
                 case 'external':
                     code.emit(f"np.save(sys.argv[{i}], initial_conditions)")
