@@ -75,6 +75,25 @@ This generates a file named `burgers.py` which implements a solver for the PDE i
 
 The elapsed time after the end of the simulation is $\Delta t \times H_t \times I$, where $H_t$ is the value of the first
 dimension in the solution hypercube and $I$ is the number of `loop_iterations`.
+Currently, Thalassa only supports Dirichlet and Neumann boundary conditions on a cubic domain. The boundary conditions
+can also be specified, with the default being Dirichlet.
+
+Assuming the initial conditions are included in a file named `ic.npy`, the generated code can be run as follows:
+```bash
+python3 burgers.py ic.npy
+```
+
+
+## Contents
+
+The library is organized as follows:
+- `thalassa` contains the main library code.
+    - `front_end.py` contains the PDESystem class as well as Thalassa's frontend, which generates expressions and stencils that implement the numerical scheme.
+    - `back_end.py` contains the backend, which generates the code that implements the numerical scheme.
+    - `discretization.py` contains convenience discretization methods to generate finite difference stencils.
+- `tests.py` contains code generation tests for Thalassa; it uses 13 PDEs to test the code generation.
+- `main.py` contains the example code shown above.
+- `requirements.txt` contains the required libraries to run Thalassa.
 
 ### Namesake
 
