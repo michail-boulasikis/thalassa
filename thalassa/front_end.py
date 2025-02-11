@@ -32,7 +32,7 @@ class PDESystem(object):
             self.name = name
 
     def __str__(self):
-        return f"PDESystem({self.equations})"
+        return f"{self.name}({self.equations})"
 
     def __repr__(self):
         return self.__str__()
