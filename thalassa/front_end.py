@@ -497,7 +497,7 @@ class PrepareIRPhase(FrontEndPhase):
                 'features': self.frontend.ir['features'],
                 'stencil': self.frontend.ir['stencil'],
                 'biases': self.frontend.ir['biases'],
-                'hypercube': (imax - imin).tolist(),
+                'hypercube': [(imax - imin).tolist(), imin, imax],
             }
 
 

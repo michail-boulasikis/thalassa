@@ -334,7 +334,10 @@ class CodeGenStencilApplicationPhase(BackEndPhase):
             # Step 2: Apply boundary conditions in the form of padding (zeros=dirichlet)
             for unk in self.backend.ir['pdes'].unknowns:
                 # Pad all dimensions from both sides except the first one (batch size)
-                paddings = [(1, 1) for _ in range(len(self.backend.ir['pdes'].free_symbols) - 1)]
+                paddings = [(
+                    -i[0] if i[0] < 0 else 0,
+                     i[1] if i[1] > 0 else 0
+                ) for i in zip(self.backend.ir['hypercube'][1], self.backend.ir['hypercube'][2])]
                 paddings = list(itertools.chain(*paddings))
                 # TODO: Other types of boundary conditions
                 code.emit(f"{unk.name} = F.pad({unk.name}, {str(paddings)}, value=0.)")
