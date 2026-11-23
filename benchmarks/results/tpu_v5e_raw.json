@@ -1,0 +1,21 @@
+{
+  "command": "PJRT_DEVICE=TPU python benchmarks/tpu_v5e.py --workload all --dtype all --baselines",
+  "conclusion": "No TPU measurements have been collected in this source workspace; run the v5e harness before making correctness or performance claims.",
+  "cpu_cuda_comparisons": [],
+  "environment": {
+    "hardware": "Google Cloud TPU v5e-8 (single xla:0 device)",
+    "python": "3.12",
+    "torch": "2.8.0",
+    "torch_xla": "2.8.0"
+  },
+  "reference_matrix": {
+    "explicit_heat": {"batch": 32, "cells": 65536, "steps": 8},
+    "implicit_advection_bicgstab": {"batch": 16, "cells": 4096, "steps": 1},
+    "implicit_heat_cg": {"batch": 16, "cells": 4096, "steps": 1},
+    "taylor_green_projected_cg": {"batch": 1, "cells": 16384, "grid": [128, 128], "steps": 1},
+    "variable_pointwise_4x4": {"batch": 16, "cells": 16384, "steps": 1}
+  },
+  "results": [],
+  "schema_version": 1,
+  "status": "not-run"
+}

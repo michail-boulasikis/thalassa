@@ -1,0 +1,5 @@
+# Reproducible single-device TPU environment (Python 3.12).
+# Install Thalassa itself with: python -m pip install -e '.[tpu]'
+torch==2.8.0
+torch-xla[tpu]==2.8.0
+sympy==1.14.0

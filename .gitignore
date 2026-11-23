@@ -1,5 +1,13 @@
 .idea
 .venv
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 generated-code
 generated-data
 plots/*.svg
@@ -9,4 +17,4 @@ reports
 *.csv
 *.onnx
 *.sarif
-burgers.py
+/burgers.py
